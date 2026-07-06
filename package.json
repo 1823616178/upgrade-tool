@@ -1,0 +1,72 @@
+{
+  "name": "ai-code-tool-updater",
+  "version": "1.0.0",
+  "description": "AI 编程助手工具更新器 - 检测版本并一键更新",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder",
+    "build:win": "electron-builder --win",
+    "icons": "node scripts/generate-icons.js",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "keywords": [
+    "updater",
+    "kimi",
+    "claude",
+    "codex",
+    "opencode",
+    "codebuddy"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3",
+    "png-to-ico": "^3.0.1",
+    "sharp": "^0.35.3"
+  },
+  "build": {
+    "appId": "com.example.ai-code-tool-updater",
+    "productName": "AI Code Tool Updater",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "index.html",
+      "style.css",
+      "script.js",
+      "package.json"
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "publisherName": "AI Code Tool Updater"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "AI Code Tool Updater"
+    },
+    "portable": {
+      "artifactName": "${productName}-${version}-portable.exe"
+    }
+  }
+}
