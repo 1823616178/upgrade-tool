@@ -49,7 +49,7 @@ const BUILTIN_TOOLS = [
   { id: 'opencode', name: 'OpenCode', cmd: 'opencode', pkg: 'opencode-ai', versionArg: '--version' },
   { id: 'codebuddy', name: 'CodeBuddy', cmd: 'codebuddy', pkg: '@tencent-ai/codebuddy-code', versionArg: '--version' },
   { id: 'qwen', name: 'Qwen Code', cmd: 'qwen', pkg: '@qwen-code/qwen-code', versionArg: '--version' },
-  { id: 'gemini', name: 'Gemini CLI', cmd: 'gemini', pkg: '@google/gemini-cli', versionArg: '--version' },
+  { id: 'antigravity', name: 'Antigravity CLI', cmd: 'agy', versionArg: '--version' },
 ];
 
 // ===== 自定义工具持久化 =====
@@ -77,10 +77,22 @@ function getAllTools() {
     ...BUILTIN_TOOLS.map(t => ({ ...t, isCustom: false })),
     ...custom.map(t => ({ ...t, isCustom: true }))
   ];
-  return all.map(t => ({
-    ...t,
-    updateCmd: `npm install -g ${t.pkg}@latest --registry=${currentRegistry}`
-  }));
+  return all.map(t => {
+    let updateCmd = '';
+    if (t.id === 'antigravity') {
+      if (os.platform() === 'win32') {
+        updateCmd = 'powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://antigravity.google/cli/install.ps1 | iex"';
+      } else {
+        updateCmd = 'curl -sSL https://antigravity.google/cli/install.sh | bash';
+      }
+    } else if (t.pkg) {
+      updateCmd = `npm install -g ${t.pkg}@latest --registry=${currentRegistry}`;
+    }
+    return {
+      ...t,
+      updateCmd
+    };
+  });
 }
 
 let mainWindow = null;
@@ -336,9 +348,53 @@ async function checkLocalVersion(tool) {
     return { installed: false, version: null, normalizedVersion: null, notFound: isCommandNotFound(err), error: err.message };
   }
 }
+function getAntigravityPlatform() {
+  const platform = os.platform();
+  const arch = os.arch();
+  let osStr = '';
+  let archStr = '';
+
+  if (platform === 'win32') {
+    osStr = 'windows';
+  } else if (platform === 'darwin') {
+    osStr = 'darwin';
+  } else if (platform === 'linux') {
+    osStr = 'linux';
+  } else {
+    osStr = 'linux'; // fallback
+  }
+
+  if (arch === 'arm64') {
+    archStr = 'arm64';
+  } else {
+    archStr = 'amd64'; // fallback
+  }
+
+  return `${osStr}_${archStr}`;
+}
 
 // 检测单个 npm 包的最新版本
 async function checkLatestVersion(tool) {
+  if (tool.id === 'antigravity') {
+    try {
+      const platform = getAntigravityPlatform();
+      const res = await fetch(`https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/${platform}.json`);
+      if (!res.ok) {
+        throw new Error(`HTTP error! status: ${res.status}`);
+      }
+      const manifest = await res.json();
+      return { latest: manifest.version };
+    } catch (err) {
+      try {
+        const res = await fetch('https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/windows_amd64.json');
+        const manifest = await res.json();
+        return { latest: manifest.version };
+      } catch (innerErr) {
+        return { latest: null, error: innerErr.message };
+      }
+    }
+  }
+
   try {
     const output = await execCommand('npm', ['view', tool.pkg, 'version', `--registry=${currentRegistry}`], { shell: true });
     return { latest: output.trim() };
@@ -380,11 +436,33 @@ async function doInstallOrUpdate(toolId) {
   let shellArgs;
 
   if (isWin) {
-    shellCmd = 'cmd.exe';
-    shellArgs = ['/c', tool.updateCmd];
+    if (tool.id === 'antigravity') {
+      const localStatus = await checkLocalVersion(tool);
+      if (localStatus.installed) {
+        shellCmd = 'cmd.exe';
+        shellArgs = ['/c', 'agy update'];
+      } else {
+        shellCmd = 'powershell.exe';
+        shellArgs = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', 'irm https://antigravity.google/cli/install.ps1 | iex'];
+      }
+    } else {
+      shellCmd = 'cmd.exe';
+      shellArgs = ['/c', tool.updateCmd];
+    }
   } else {
-    shellCmd = 'sh';
-    shellArgs = ['-c', tool.updateCmd];
+    if (tool.id === 'antigravity') {
+      const localStatus = await checkLocalVersion(tool);
+      if (localStatus.installed) {
+        shellCmd = 'sh';
+        shellArgs = ['-c', 'agy update'];
+      } else {
+        shellCmd = 'sh';
+        shellArgs = ['-c', 'curl -sSL https://antigravity.google/cli/install.sh | bash'];
+      }
+    } else {
+      shellCmd = 'sh';
+      shellArgs = ['-c', tool.updateCmd];
+    }
   }
 
   return new Promise((resolve, reject) => {
@@ -598,4 +676,85 @@ ipcMain.handle('save-settings', (event, newSettings) => {
     startBackgroundCheck();
   }
   return { success: true };
+});
+
+// ===== 一键配置 agyyolo 到 PowerShell Profile =====
+
+const AGYYOLO_FUNCTION_BODY = `function agyyolo {\n    agy --dangerously-skip-permissions\n}\n`;
+
+function getPowerShellProfiles() {
+  const home = os.homedir();
+  return [
+    path.join(home, 'Documents', 'WindowsPowerShell', 'Microsoft.PowerShell_profile.ps1'),
+    path.join(home, 'Documents', 'PowerShell', 'Microsoft.PowerShell_profile.ps1')
+  ];
+}
+
+function ensureProfile(profilePath) {
+  const dir = path.dirname(profilePath);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  if (!fs.existsSync(profilePath)) {
+    fs.writeFileSync(profilePath, '', 'utf-8');
+  }
+  return profilePath;
+}
+
+function installAgyyoloToProfile(profilePath) {
+  if (!profilePath) {
+    return { ok: false, reason: 'Profile 路径为空' };
+  }
+
+  ensureProfile(profilePath);
+
+  const content = fs.readFileSync(profilePath, 'utf-8');
+  if (/function\s+agyyolo\b/.test(content)) {
+    return { ok: true, reason: '已存在，跳过' };
+  }
+
+  const ending = content && !content.endsWith('\n') ? '\n\n' : '';
+  fs.writeFileSync(profilePath, content + ending + AGYYOLO_FUNCTION_BODY, 'utf-8');
+  return { ok: true, reason: '已写入' };
+}
+
+ipcMain.handle('install-agyyolo', async () => {
+  // 先检测 agy 是否安装
+  let agyFound = false;
+  try {
+    await execCommand('agy', ['--version'], { shell: true, timeout: 10000 });
+    agyFound = true;
+  } catch {
+    agyFound = false;
+  }
+
+  if (!agyFound) {
+    const message = '未检测到 agy 命令，请先安装 agy 并将其所在目录加入系统 PATH，再执行配置。';
+    sendLog('error', 'system', message);
+    return { success: false, agyFound: false, results: [], message };
+  }
+
+  sendLog('info', 'system', 'agy 命令已找到，开始将 agyyolo 配置到 PowerShell Profile ...');
+
+  const results = [];
+  const seen = new Set();
+
+  for (const profilePath of getPowerShellProfiles()) {
+    const key = profilePath.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    try {
+      const result = installAgyyoloToProfile(profilePath);
+      results.push({ profile: profilePath, ...result });
+      sendLog(result.ok ? 'success' : 'error', 'system', `[${result.ok ? 'OK' : 'FAIL'}] ${profilePath} - ${result.reason}`);
+    } catch (err) {
+      results.push({ profile: profilePath, ok: false, reason: err.message });
+      sendLog('error', 'system', `[FAIL] ${profilePath} - ${err.message}`);
+    }
+  }
+
+  sendLog('success', 'system', 'agyyolo 配置完成。请重新打开 PowerShell 窗口使用 agyyolo。');
+
+  return { success: true, results, agyFound: true };
 });

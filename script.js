@@ -13,6 +13,7 @@ const btnClearLog = document.getElementById('btn-clear-log');
 const btnCopyLog = document.getElementById('btn-copy-log');
 const btnExportLog = document.getElementById('btn-export-log');
 const btnAddTool = document.getElementById('btn-add-tool');
+const btnInstallAgyyolo = document.getElementById('btn-install-agyyolo');
 const selectRegistry = document.getElementById('select-registry');
 const envBanner = document.getElementById('env-banner');
 const envBannerText = document.getElementById('env-banner-text');
@@ -52,6 +53,7 @@ function bindEvents() {
   btnCheck.addEventListener('click', checkVersions);
   btnUpdateAll.addEventListener('click', updateAll);
   btnAdmin.addEventListener('click', () => window.electronAPI.showAdminTip());
+  btnInstallAgyyolo.addEventListener('click', installAgyyolo);
   btnClearLog.addEventListener('click', clearLog);
   btnCopyLog.addEventListener('click', copyLog);
   btnExportLog.addEventListener('click', exportLog);
@@ -179,7 +181,7 @@ async function saveCustomTool() {
 // ===== 渲染骨架屏 =====
 function renderSkeleton() {
   toolsGrid.innerHTML = '';
-  const names = ['Kimi Code', 'Claude Code', 'OpenAI Codex', 'OpenCode', 'CodeBuddy', 'Qwen Code', 'Gemini CLI'];
+  const names = ['Kimi Code', 'Claude Code', 'OpenAI Codex', 'OpenCode', 'CodeBuddy', 'Qwen Code', 'Antigravity CLI'];
   for (const name of names) {
     const card = document.createElement('div');
     card.className = 'tool-card';
@@ -374,6 +376,32 @@ async function installTool(toolId) {
     isUpdating = false;
     updateUIState(false);
     await refreshSingleTool(toolId);
+  }
+}
+
+// ===== 一键配置 agyyolo 到 PowerShell Profile =====
+async function installAgyyolo() {
+  try {
+    btnInstallAgyyolo.disabled = true;
+    appendLog('start', 'system', '正在检测 agy 是否安装 ...');
+
+    const result = await window.electronAPI.installAgyyolo();
+    if (!result.success) {
+      appendLog('error', 'system', result.message || 'agyyolo 配置失败');
+      return;
+    }
+
+    for (const item of result.results) {
+      const status = item.ok ? 'OK' : 'FAIL';
+      const type = item.ok ? 'success' : 'error';
+      appendLog(type, 'system', `[${status}] ${item.profile} - ${item.reason}`);
+    }
+
+    appendLog('success', 'system', 'agyyolo 配置完成。请重新打开 PowerShell 窗口使用 agyyolo。');
+  } catch (err) {
+    appendLog('error', 'system', `配置 agyyolo 异常: ${err.message}`);
+  } finally {
+    btnInstallAgyyolo.disabled = false;
   }
 }
 

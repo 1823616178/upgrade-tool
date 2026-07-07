@@ -66,6 +66,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 显示管理员权限提示
   showAdminTip: () => ipcRenderer.invoke('show-admin-tip'),
 
+  // 一键配置 agyyolo 到 PowerShell Profile
+  installAgyyolo: () => ipcRenderer.invoke('install-agyyolo'),
+
   // 打开外部链接
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
 
