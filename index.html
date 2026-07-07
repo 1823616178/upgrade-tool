@@ -72,12 +72,6 @@
     </header>
 
     <main class="main">
-      <!-- 环境信息栏 -->
-      <div id="env-info" class="env-info" style="display: none;">
-        <span id="env-node" class="env-tag">Node: -</span>
-        <span id="env-npm" class="env-tag">npm: -</span>
-      </div>
-
       <div id="tools-grid" class="tools-grid">
         <!-- 工具卡片由 JS 动态生成 -->
       </div>
@@ -98,7 +92,12 @@
     </main>
 
     <footer class="footer">
-      <span>版本检测基于 npm view，更新基于 npm install -g ｜ 关闭窗口将最小化到系统托盘</span>
+      <div class="footer-env">
+        <span id="env-node" class="env-tag">Node: —</span>
+        <span id="env-npm" class="env-tag">npm: —</span>
+        <span id="env-os" class="env-tag">OS: —</span>
+      </div>
+      <span class="footer-hint">版本检测基于 npm view · 关闭窗口最小化到托盘</span>
     </footer>
   </div>
 

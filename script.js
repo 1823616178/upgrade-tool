@@ -19,9 +19,9 @@ const selectRegistry = document.getElementById('select-registry');
 const envBanner = document.getElementById('env-banner');
 const envBannerText = document.getElementById('env-banner-text');
 const btnDismissEnv = document.getElementById('btn-dismiss-env');
-const envInfo = document.getElementById('env-info');
 const envNode = document.getElementById('env-node');
 const envNpm = document.getElementById('env-npm');
+const envOs = document.getElementById('env-os');
 
 // 模态框元素
 const modalOverlay = document.getElementById('modal-overlay');
@@ -94,12 +94,10 @@ async function checkEnvironment() {
   try {
     const env = await window.electronAPI.checkEnvironment();
 
-    // 显示环境信息栏
-    if (env.node || env.npm) {
-      envInfo.style.display = 'flex';
-      envNode.textContent = `Node: ${env.node || '未检测到'}`;
-      envNpm.textContent = `npm: ${env.npm || '未检测到'}`;
-    }
+    // 展示环境信息到 footer
+    if (envNode) envNode.textContent = `Node: ${env.node || '未安装'}`;
+    if (envNpm)  envNpm.textContent  = `npm: ${env.npm   || '未安装'}`;
+    if (envOs)   envOs.textContent   = env.os || 'OS: 未知';
 
     // 如果有错误，显示警告横幅
     if (env.errors && env.errors.length > 0) {

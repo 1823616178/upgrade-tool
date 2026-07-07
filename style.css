@@ -683,13 +683,25 @@ html, body {
    Footer
    ======================================== */
 .footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   padding: 8px 24px;
   background: var(--surface);
   border-top: 1px solid var(--border);
-  text-align: center;
+  flex-shrink: 0;
+}
+
+.footer-env {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.footer-hint {
   font-size: 11px;
   color: var(--text-muted);
-  flex-shrink: 0;
   letter-spacing: 0.2px;
 }
 

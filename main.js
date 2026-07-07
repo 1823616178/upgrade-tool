@@ -112,8 +112,12 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js')
     },
     titleBarStyle: 'default',
+    autoHideMenuBar: true,
     show: false
   });
+
+  // 彻底隐藏原生菜单栏
+  Menu.setApplicationMenu(null);
 
   mainWindow.loadFile(path.join(__dirname, 'index.html'));
 
@@ -587,7 +591,7 @@ ipcMain.handle('remove-custom-tool', (event, toolId) => {
 // ===== 环境健康检测 IPC =====
 
 ipcMain.handle('check-environment', async () => {
-  const result = { node: null, npm: null, errors: [] };
+  const result = { node: null, npm: null, os: null, errors: [] };
 
   try {
     const nodeOutput = await execCommand('node', ['-v'], { shell: true, timeout: 10000 });
@@ -601,6 +605,13 @@ ipcMain.handle('check-environment', async () => {
     result.npm = npmOutput.trim();
   } catch {
     result.errors.push('未检测到 npm，请检查 Node.js 安装是否完整');
+  }
+
+  // 获取 Windows 版本
+  try {
+    result.os = `Windows ${os.release()}`;
+  } catch {
+    result.os = os.platform();
   }
 
   // 检查 Node 版本是否过低（要求 >= 18）
