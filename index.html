@@ -8,17 +8,34 @@
 </head>
 <body>
   <div class="app">
+    <!-- 环境异常警告横幅（默认隐藏） -->
+    <div id="env-banner" class="env-banner" style="display: none;">
+      <span class="env-banner-icon">⚠️</span>
+      <span id="env-banner-text">环境检测中...</span>
+      <button id="btn-dismiss-env" class="btn btn-ghost btn-sm">关闭</button>
+    </div>
+
     <header class="header">
       <div class="header-left">
         <h1>AI Code Tool Updater</h1>
-        <p class="subtitle">检测并一键更新 Kimi / Claude / Codex / OpenCode / CodeBuddy / Qwen / Gemini</p>
+        <p class="subtitle">检测并一键更新 AI 编程助手工具</p>
       </div>
       <div class="header-actions">
+        <!-- 镜像源选择 -->
+        <div class="registry-selector">
+          <label class="registry-label">镜像源</label>
+          <select id="select-registry" class="select-registry">
+            <!-- 由 JS 动态填充 -->
+          </select>
+        </div>
         <button id="btn-check" class="btn btn-primary">
           <span class="icon">🔍</span> 检测版本
         </button>
         <button id="btn-update-all" class="btn btn-success" disabled>
           <span class="icon">🚀</span> 一键更新全部
+        </button>
+        <button id="btn-add-tool" class="btn btn-ghost" title="添加自定义工具">
+          <span class="icon">➕</span> 添加工具
         </button>
         <button id="btn-admin" class="btn btn-ghost">
           <span class="icon">⚠️</span> 管理员提示
@@ -27,6 +44,12 @@
     </header>
 
     <main class="main">
+      <!-- 环境信息栏 -->
+      <div id="env-info" class="env-info" style="display: none;">
+        <span id="env-node" class="env-tag">Node: -</span>
+        <span id="env-npm" class="env-tag">npm: -</span>
+      </div>
+
       <div id="tools-grid" class="tools-grid">
         <!-- 工具卡片由 JS 动态生成 -->
       </div>
@@ -34,7 +57,11 @@
       <section class="log-section">
         <div class="log-header">
           <h2>实时日志</h2>
-          <button id="btn-clear-log" class="btn btn-ghost btn-sm">清空</button>
+          <div class="log-actions">
+            <button id="btn-copy-log" class="btn btn-ghost btn-sm" title="复制日志">📋 复制</button>
+            <button id="btn-export-log" class="btn btn-ghost btn-sm" title="导出日志">💾 导出</button>
+            <button id="btn-clear-log" class="btn btn-ghost btn-sm">清空</button>
+          </div>
         </div>
         <div id="log-container" class="log-container">
           <div class="log-empty">点击「检测版本」开始</div>
@@ -43,8 +70,40 @@
     </main>
 
     <footer class="footer">
-      <span>版本检测基于 npm view，更新基于 npm install -g</span>
+      <span>版本检测基于 npm view，更新基于 npm install -g ｜ 关闭窗口将最小化到系统托盘</span>
     </footer>
+  </div>
+
+  <!-- 添加自定义工具的模态框 -->
+  <div id="modal-overlay" class="modal-overlay" style="display: none;">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>添加自定义工具</h3>
+        <button id="btn-modal-close" class="btn-modal-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label>工具名称 <span class="required">*</span></label>
+          <input id="input-tool-name" type="text" class="form-input" placeholder="例如：My CLI Tool" />
+        </div>
+        <div class="form-group">
+          <label>npm 包名 <span class="required">*</span></label>
+          <input id="input-tool-pkg" type="text" class="form-input" placeholder="例如：@scope/my-cli" />
+        </div>
+        <div class="form-group">
+          <label>CLI 命令名 <span class="required">*</span></label>
+          <input id="input-tool-cmd" type="text" class="form-input" placeholder="例如：mycli" />
+        </div>
+        <div class="form-group">
+          <label>版本参数</label>
+          <input id="input-tool-version-arg" type="text" class="form-input" placeholder="默认 --version" value="--version" />
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-modal-cancel" class="btn btn-ghost">取消</button>
+        <button id="btn-modal-save" class="btn btn-primary">保存</button>
+      </div>
+    </div>
   </div>
 
   <script src="script.js"></script>
