@@ -14,6 +14,7 @@ const btnCopyLog = document.getElementById('btn-copy-log');
 const btnExportLog = document.getElementById('btn-export-log');
 const btnAddTool = document.getElementById('btn-add-tool');
 const btnInstallAgyyolo = document.getElementById('btn-install-agyyolo');
+const btnOpenPowerShell = document.getElementById('btn-open-powershell');
 const selectRegistry = document.getElementById('select-registry');
 const envBanner = document.getElementById('env-banner');
 const envBannerText = document.getElementById('env-banner-text');
@@ -54,6 +55,7 @@ function bindEvents() {
   btnUpdateAll.addEventListener('click', updateAll);
   btnAdmin.addEventListener('click', () => window.electronAPI.showAdminTip());
   btnInstallAgyyolo.addEventListener('click', installAgyyolo);
+  btnOpenPowerShell.addEventListener('click', openPowerShell);
   btnClearLog.addEventListener('click', clearLog);
   btnCopyLog.addEventListener('click', copyLog);
   btnExportLog.addEventListener('click', exportLog);
@@ -402,6 +404,20 @@ async function installAgyyolo() {
     appendLog('error', 'system', `配置 agyyolo 异常: ${err.message}`);
   } finally {
     btnInstallAgyyolo.disabled = false;
+  }
+}
+
+async function openPowerShell() {
+  try {
+    appendLog('info', 'system', '正在打开 PowerShell 窗口...');
+    const result = await window.electronAPI.openPowerShell();
+    if (result.success) {
+      appendLog('success', 'system', 'PowerShell 窗口已成功打开');
+    } else {
+      appendLog('error', 'system', `打开 PowerShell 失败: ${result.error}`);
+    }
+  } catch (err) {
+    appendLog('error', 'system', `打开 PowerShell 异常: ${err.message}`);
   }
 }
 

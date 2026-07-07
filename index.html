@@ -4,10 +4,17 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AI Code Tool Updater</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <div class="app">
+    <!-- 背景光效装饰 -->
+    <div class="bg-glow bg-glow-1"></div>
+    <div class="bg-glow bg-glow-2"></div>
+
     <!-- 环境异常警告横幅（默认隐藏） -->
     <div id="env-banner" class="env-banner" style="display: none;">
       <span class="env-banner-icon">⚠️</span>
@@ -16,33 +23,51 @@
     </div>
 
     <header class="header">
-      <div class="header-left">
-        <h1>AI Code Tool Updater</h1>
-        <p class="subtitle">检测并一键更新 AI 编程助手工具</p>
-      </div>
-      <div class="header-actions">
-        <!-- 镜像源选择 -->
-        <div class="registry-selector">
-          <label class="registry-label">镜像源</label>
-          <select id="select-registry" class="select-registry">
-            <!-- 由 JS 动态填充 -->
-          </select>
+      <div class="header-top">
+        <div class="header-left">
+          <div class="header-logo">
+            <span class="logo-icon">✦</span>
+          </div>
+          <div>
+            <h1>AI Code Tool Updater</h1>
+            <p class="subtitle">检测并一键更新 AI 编程助手工具</p>
+          </div>
         </div>
-        <button id="btn-check" class="btn btn-primary">
-          <span class="icon">🔍</span> 检测版本
-        </button>
-        <button id="btn-update-all" class="btn btn-success" disabled>
-          <span class="icon">🚀</span> 一键更新全部
-        </button>
-        <button id="btn-add-tool" class="btn btn-ghost" title="添加自定义工具">
-          <span class="icon">➕</span> 添加工具
-        </button>
-        <button id="btn-admin" class="btn btn-ghost">
-          <span class="icon">⚠️</span> 管理员提示
-        </button>
-        <button id="btn-install-agyyolo" class="btn btn-ghost" title="将 agyyolo 函数永久配置到 PowerShell">
-          <span class="icon">⚡</span> 配置 agyyolo
-        </button>
+        <div class="header-meta">
+          <div class="registry-selector">
+            <label class="registry-label">🌐 镜像源</label>
+            <div class="select-wrapper">
+              <select id="select-registry" class="select-registry">
+                <!-- 由 JS 动态填充 -->
+              </select>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="header-toolbar">
+        <div class="toolbar-group toolbar-group-main">
+          <button id="btn-check" class="btn btn-primary">
+            <span class="icon">🔍</span> 检测版本
+          </button>
+          <button id="btn-update-all" class="btn btn-success" disabled>
+            <span class="icon">🚀</span> 一键更新全部
+          </button>
+        </div>
+        <div class="toolbar-divider"></div>
+        <div class="toolbar-group toolbar-group-util">
+          <button id="btn-open-powershell" class="btn btn-tool" title="一键打开 PowerShell 窗口">
+            <span class="icon">💻</span> PowerShell
+          </button>
+          <button id="btn-install-agyyolo" class="btn btn-tool" title="将 agyyolo 函数永久配置到 PowerShell">
+            <span class="icon">⚡</span> 配置 yolo
+          </button>
+          <button id="btn-add-tool" class="btn btn-tool" title="添加自定义工具">
+            <span class="icon">➕</span> 添加工具
+          </button>
+          <button id="btn-admin" class="btn btn-tool" title="查看管理员权限说明">
+            <span class="icon">⚠️</span> 权限提示
+          </button>
+        </div>
       </div>
     </header>
 

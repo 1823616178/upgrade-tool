@@ -758,3 +758,50 @@ ipcMain.handle('install-agyyolo', async () => {
 
   return { success: true, results, agyFound: true };
 });
+
+// ===== 一键打开 PowerShell IPC =====
+
+ipcMain.handle('open-powershell', async () => {
+  const isWin = os.platform() === 'win32';
+  const { spawn } = require('child_process');
+
+  if (isWin) {
+    try {
+      const child = spawn('cmd.exe', ['/c', 'start powershell'], {
+        detached: true,
+        stdio: 'ignore'
+      });
+      child.unref();
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  } else {
+    // macOS or Linux
+    if (os.platform() === 'darwin') {
+      try {
+        const child = spawn('osascript', ['-e', 'tell application "Terminal" to do script ""', '-e', 'tell application "Terminal" to activate'], {
+          detached: true,
+          stdio: 'ignore'
+        });
+        child.unref();
+        return { success: true };
+      } catch (err) {
+        return { success: false, error: err.message };
+      }
+    } else {
+      // Linux
+      try {
+        const child = spawn('x-terminal-emulator', [], {
+          detached: true,
+          stdio: 'ignore'
+        });
+        child.unref();
+        return { success: true };
+      } catch (err) {
+        return { success: false, error: err.message };
+      }
+    }
+  }
+});
+

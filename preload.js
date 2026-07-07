@@ -69,6 +69,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 一键配置 agyyolo 到 PowerShell Profile
   installAgyyolo: () => ipcRenderer.invoke('install-agyyolo'),
 
+  // 一键打开 PowerShell
+  openPowerShell: () => ipcRenderer.invoke('open-powershell'),
+
   // 打开外部链接
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
 
