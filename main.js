@@ -1,3 +1,5 @@
+// ===== Electron 主进程入口 =====
+// 依赖：electron（应用框架）、path/fs（文件操作）、child_process（执行系统命令）、os（系统信息）
 const { app, BrowserWindow, ipcMain, dialog, Tray, Menu, Notification, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -5,16 +7,27 @@ const { spawn } = require('child_process');
 const os = require('os');
 
 // ===== 镜像源配置 =====
+// 支持 npm 官方源和淘宝镜像源，用户可在设置中切换
 const REGISTRIES = [
   { id: 'npm', name: 'npm 官方源', url: 'https://registry.npmjs.org/' },
   { id: 'npmmirror', name: '淘宝镜像源 (npmmirror)', url: 'https://registry.npmmirror.com/' },
 ];
 
 // ===== 设置持久化 =====
+// 用户设置（镜像源、后台检测间隔等）保存在 userData/settings.json
+
+/**
+ * 获取设置文件的完整路径
+ * @returns {string} settings.json 的绝对路径
+ */
 function getSettingsPath() {
   return path.join(app.getPath('userData'), 'settings.json');
 }
 
+/**
+ * 从磁盘加载用户设置，文件不存在或解析失败时返回空对象
+ * @returns {object} 解析后的设置对象
+ */
 function loadSettings() {
   try {
     const data = fs.readFileSync(getSettingsPath(), 'utf-8');
@@ -24,13 +37,17 @@ function loadSettings() {
   }
 }
 
+/**
+ * 将新设置合并到现有设置中并写入磁盘（保留未修改的字段）
+ * @param {object} settings - 需要保存的部分设置
+ */
 function saveSettings(settings) {
   const current = loadSettings();
   const merged = { ...current, ...settings };
   fs.writeFileSync(getSettingsPath(), JSON.stringify(merged, null, 2), 'utf-8');
 }
 
-// 当前活跃的镜像源 URL
+// 当前活跃的镜像源 URL，默认使用第一个（npm 官方源）
 let currentRegistry = REGISTRIES[0].url;
 
 // 从持久化配置中恢复用户上次选择的镜像源
@@ -39,9 +56,11 @@ try {
   if (saved.registry) {
     currentRegistry = saved.registry;
   }
-} catch { /* 首次启动，无配置文件 */ }
+} catch { /* 首次启动，无配置文件，使用默认值 */ }
 
-// ===== 内置工具配置（不再硬编码 updateCmd，而是动态拼接当前镜像源） =====
+// ===== 内置工具配置 =====
+// 预定义的 AI 编码工具列表，包含 CLI 命令名和对应的 npm 包名
+// updateCmd 不再硬编码，而是根据当前镜像源动态生成（见 getAllTools）
 const BUILTIN_TOOLS = [
   { id: 'kimi', name: 'Kimi Code', cmd: 'kimi', pkg: '@moonshot-ai/kimi-code', versionArg: '--version' },
   { id: 'claude', name: 'Claude Code', cmd: 'claude', pkg: '@anthropic-ai/claude-code', versionArg: '--version' },
@@ -49,14 +68,25 @@ const BUILTIN_TOOLS = [
   { id: 'opencode', name: 'OpenCode', cmd: 'opencode', pkg: 'opencode-ai', versionArg: '--version' },
   { id: 'codebuddy', name: 'CodeBuddy', cmd: 'codebuddy', pkg: '@tencent-ai/codebuddy-code', versionArg: '--version' },
   { id: 'qwen', name: 'Qwen Code', cmd: 'qwen', pkg: '@qwen-code/qwen-code', versionArg: '--version' },
+  // antigravity 使用独立的安装脚本，不通过 npm 安装
   { id: 'antigravity', name: 'Antigravity CLI', cmd: 'agy', versionArg: '--version' },
 ];
 
 // ===== 自定义工具持久化 =====
+// 用户自定义的工具列表保存在 userData/custom-tools.json
+
+/**
+ * 获取自定义工具文件的完整路径
+ * @returns {string} custom-tools.json 的绝对路径
+ */
 function getCustomToolsPath() {
   return path.join(app.getPath('userData'), 'custom-tools.json');
 }
 
+/**
+ * 从磁盘加载自定义工具列表
+ * @returns {object[]} 自定义工具数组，文件不存在时返回空数组
+ */
 function loadCustomTools() {
   try {
     const data = fs.readFileSync(getCustomToolsPath(), 'utf-8');
@@ -66,11 +96,20 @@ function loadCustomTools() {
   }
 }
 
+/**
+ * 将自定义工具列表写入磁盘
+ * @param {object[]} tools - 要保存的工具数组
+ */
 function saveCustomTools(tools) {
   fs.writeFileSync(getCustomToolsPath(), JSON.stringify(tools, null, 2), 'utf-8');
 }
 
-// 获取所有工具（内置 + 自定义），动态拼接当前镜像源生成 updateCmd
+/**
+ * 获取所有工具（内置 + 自定义），并根据当前镜像源动态生成 updateCmd
+ * - 普通 npm 工具：npm install -g <pkg>@latest --registry=<当前镜像源>
+ * - antigravity：使用官方安装脚本（Windows 用 PowerShell，其他用 curl|bash）
+ * @returns {object[]} 合并后的工具列表，每个工具附带 isCustom 和 updateCmd 字段
+ */
 function getAllTools() {
   const custom = loadCustomTools();
   const all = [
@@ -80,12 +119,14 @@ function getAllTools() {
   return all.map(t => {
     let updateCmd = '';
     if (t.id === 'antigravity') {
+      // antigravity 使用独立安装脚本，不走 npm
       if (os.platform() === 'win32') {
         updateCmd = 'powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://antigravity.google/cli/install.ps1 | iex"';
       } else {
         updateCmd = 'curl -sSL https://antigravity.google/cli/install.sh | bash';
       }
     } else if (t.pkg) {
+      // 普通 npm 全局安装命令，镜像源从当前配置动态拼接
       updateCmd = `npm install -g ${t.pkg}@latest --registry=${currentRegistry}`;
     }
     return {
@@ -95,10 +136,18 @@ function getAllTools() {
   });
 }
 
-let mainWindow = null;
-let tray = null;
-let backgroundTimer = null;
+// ===== 全局状态变量 =====
+let mainWindow = null;    // 主窗口实例
+let tray = null;          // 系统托盘实例
+let backgroundTimer = null; // 后台版本检测定时器引用
 
+/**
+ * 创建主应用窗口
+ * - 设置窗口尺寸、最小尺寸、图标
+ * - 启用 contextIsolation 安全策略，通过 preload.js 暴露 API
+ * - 加载 index.html 作为 UI
+ * - 关闭窗口时根据设置决定是否最小化到托盘
+ */
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1100,
@@ -107,25 +156,26 @@ function createWindow() {
     minHeight: 600,
     icon: path.join(__dirname, 'build', 'icon.ico'),
     webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
+      nodeIntegration: false,    // 禁止渲染进程直接访问 Node.js
+      contextIsolation: true,    // 隔离 preload 和渲染进程上下文
       preload: path.join(__dirname, 'preload.js')
     },
     titleBarStyle: 'default',
     autoHideMenuBar: true,
-    show: false
+    show: false // 先隐藏，等 ready-to-show 再显示，避免白屏闪烁
   });
 
-  // 彻底隐藏原生菜单栏
+  // 彻底隐藏原生菜单栏（不使用默认菜单）
   Menu.setApplicationMenu(null);
 
   mainWindow.loadFile(path.join(__dirname, 'index.html'));
 
+  // 页面加载完成后显示窗口
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
   });
 
-  // 关闭窗口时最小化到托盘，而非真正退出
+  // 关闭窗口时最小化到托盘（如果用户开启了该选项且托盘已创建）
   mainWindow.on('close', (event) => {
     const settings = loadSettings();
     if (settings.minimizeToTray !== false && tray) {
@@ -134,12 +184,20 @@ function createWindow() {
     }
   });
 
+  // 窗口被销毁后清理引用
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
 }
 
 // ===== 系统托盘 =====
+
+/**
+ * 创建系统托盘图标及右键菜单
+ * - 左键双击：显示并聚焦主窗口
+ * - 右键菜单：显示主窗口 / 立即检测更新 / 退出应用
+ * - 如果图标文件不存在则静默跳过
+ */
 function createTray() {
   const iconPath = path.join(__dirname, 'build', 'icon.ico');
   try {
@@ -149,6 +207,7 @@ function createTray() {
     return;
   }
 
+  // 构建右键上下文菜单
   const contextMenu = Menu.buildFromTemplate([
     {
       label: '显示主窗口',
@@ -176,7 +235,7 @@ function createTray() {
     {
       label: '退出',
       click: () => {
-        // 真正退出应用
+        // 真正退出应用（销毁托盘后调用 app.exit）
         tray.destroy();
         tray = null;
         app.exit(0);
@@ -187,6 +246,7 @@ function createTray() {
   tray.setToolTip('AI Code Tool Updater');
   tray.setContextMenu(contextMenu);
 
+  // 双击托盘图标恢复窗口
   tray.on('double-click', () => {
     if (mainWindow) {
       mainWindow.show();
@@ -196,11 +256,17 @@ function createTray() {
 }
 
 // ===== 后台静默版本检测 =====
+
+/**
+ * 启动后台定时检测任务
+ * - 读取用户设置的检测间隔（默认 4 小时，设为 0 则禁用）
+ * - 定时检测所有工具版本，有新版本时弹出系统通知
+ */
 function startBackgroundCheck() {
-  stopBackgroundCheck();
+  stopBackgroundCheck(); // 先清除已有定时器，避免重复
   const settings = loadSettings();
   const hours = settings.backgroundCheckHours || 4;
-  if (hours <= 0) return;
+  if (hours <= 0) return; // 用户禁用了后台检测
 
   const intervalMs = hours * 60 * 60 * 1000;
   backgroundTimer = setInterval(async () => {
@@ -223,10 +289,13 @@ function startBackgroundCheck() {
         });
         notification.show();
       }
-    } catch { /* 静默检测异常不做处理 */ }
+    } catch { /* 静默检测异常不做处理，等待下次定时 */ }
   }, intervalMs);
 }
 
+/**
+ * 停止后台版本检测定时器
+ */
 function stopBackgroundCheck() {
   if (backgroundTimer) {
     clearInterval(backgroundTimer);
@@ -235,43 +304,65 @@ function stopBackgroundCheck() {
 }
 
 // ===== 应用生命周期 =====
+
+// Electron 就绪后创建窗口、托盘并启动后台检测
 app.whenReady().then(() => {
   createWindow();
   createTray();
   startBackgroundCheck();
 });
 
+// 所有窗口关闭时：如果托盘存在则保持运行（最小化到托盘），否则退出
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
-    // 如果托盘存在则不退出
     if (!tray) {
       app.quit();
     }
   }
 });
 
+// macOS 上点击 Dock 图标时重新创建窗口
 app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) {
     createWindow();
   }
 });
 
-// 向渲染进程发送日志
+// ===== 日志发送工具 =====
+
+/**
+ * 向渲染进程发送日志消息（通过 update-log 通道）
+ * @param {string} type - 日志类型：info / success / error / start / data
+ * @param {string} toolId - 关联的工具 ID（系统日志用 'system'）
+ * @param {string} message - 日志内容
+ */
 function sendLog(type, toolId, message) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('update-log', { type, toolId, message, time: new Date().toLocaleTimeString() });
   }
 }
 
-// 版本检测子进程超时时间（毫秒）
+// ===== 命令执行工具 =====
+
+// 版本检测子进程超时时间（毫秒），防止命令卡住
 const CHECK_TIMEOUT = 30000;
 
-// 执行命令并返回输出字符串
+/**
+ * 执行系统命令并返回 stdout 输出
+ * - Windows 下支持通过 cmd.exe 执行 shell 命令
+ * - 内置超时保护，超时后自动终止子进程
+ * - 支持 onData 回调实时获取输出（用于安装进度显示）
+ * @param {string} command - 要执行的命令
+ * @param {string[]} args - 命令参数
+ * @param {object} options - { shell, timeout, ignoreError, onData }
+ * @returns {Promise<string>} 命令的标准输出
+ */
 function execCommand(command, args = [], options = {}) {
   return new Promise((resolve, reject) => {
     const isWin = os.platform() === 'win32';
     let child;
     if (isWin && options.shell) {
+      // Windows 下通过 cmd.exe 执行，支持 .bat/.cmd 等
       child = spawn('cmd.exe', ['/c', command, ...args], { env: process.env });
     } else {
       child = spawn(command, args, { env: process.env, shell: options.shell || false });
@@ -279,7 +370,7 @@ function execCommand(command, args = [], options = {}) {
 
     let stdout = '';
     let stderr = '';
-    let settled = false;
+    let settled = false; // 防止超时和 close 事件竞争
 
     // 超时保护：避免子进程卡住导致 Promise 永远不结束
     const timeoutMs = options.timeout || CHECK_TIMEOUT;
@@ -304,6 +395,7 @@ function execCommand(command, args = [], options = {}) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      // ENOENT 表示命令不存在，统一用 127 退出码标识
       if (err.code === 'ENOENT') err.exitCode = 127;
       reject(err);
     });
@@ -323,26 +415,44 @@ function execCommand(command, args = [], options = {}) {
   });
 }
 
-// 从版本输出中提取纯语义化版本号（部分 CLI 会在版本号前后附带工具名等文字，如
-// "2.1.201 (Claude Code)" 或 "codex-cli 0.142.5"，需要先提纯再比较，否则永远判定为不相等）
+// ===== 版本号处理工具 =====
+
+/**
+ * 从版本输出中提取纯语义化版本号
+ * 部分 CLI 会在版本号前后附带工具名等文字，如 "2.1.201 (Claude Code)" 或 "codex-cli 0.142.5"
+ * 需要先提纯再比较，否则永远判定为不相等
+ * @param {string} text - 原始版本输出文本
+ * @returns {string|null} 提取到的版本号（如 "1.2.3"），未匹配则返回原文
+ */
 function extractVersionNumber(text) {
   if (!text) return null;
   const match = text.match(/\d+\.\d+\.\d+(?:[-.][0-9A-Za-z.-]+)?/);
   return match ? match[0] : text.trim();
 }
 
-// 判断命令执行失败是否是"命令不存在"（未安装），而非真正的异常（超时、权限等）
+/**
+ * 判断命令执行失败是否是"命令不存在"（即工具未安装），而非真正的异常（超时、权限等）
+ * @param {Error} err - execCommand 抛出的错误对象
+ * @returns {boolean} 是否为命令未找到
+ */
 function isCommandNotFound(err) {
   if (!err) return false;
   if (err.exitCode === 127) return true; // ENOENT 或 shell 的标准"命令未找到"退出码
   const msg = err.message || '';
   if (os.platform() === 'win32') {
+    // Windows 中文系统返回"不是内部或外部命令"
     return /不是内部或外部命令|不是可运行的程序|is not recognized as an internal or external command/i.test(msg);
   }
   return /command not found|不存在该命令/i.test(msg);
 }
 
-// 检测单个工具的本地版本
+// ===== 版本检测核心逻辑 =====
+
+/**
+ * 检测单个工具的本地安装版本
+ * @param {object} tool - 工具配置对象
+ * @returns {Promise<object>} { installed, version, normalizedVersion, notFound, error }
+ */
 async function checkLocalVersion(tool) {
   try {
     const output = await execCommand(tool.cmd, [tool.versionArg], { shell: true });
@@ -352,6 +462,11 @@ async function checkLocalVersion(tool) {
     return { installed: false, version: null, normalizedVersion: null, notFound: isCommandNotFound(err), error: err.message };
   }
 }
+
+/**
+ * 根据当前操作系统和架构返回 antigravity 的平台标识
+ * @returns {string} 如 "windows_amd64"、"darwin_arm64"
+ */
 function getAntigravityPlatform() {
   const platform = os.platform();
   const arch = os.arch();
@@ -365,19 +480,25 @@ function getAntigravityPlatform() {
   } else if (platform === 'linux') {
     osStr = 'linux';
   } else {
-    osStr = 'linux'; // fallback
+    osStr = 'linux'; // 未知系统默认按 Linux 处理
   }
 
   if (arch === 'arm64') {
     archStr = 'arm64';
   } else {
-    archStr = 'amd64'; // fallback
+    archStr = 'amd64'; // 非 arm64 一律视为 amd64（含 x64、x86）
   }
 
   return `${osStr}_${archStr}`;
 }
 
-// 检测单个 npm 包的最新版本
+/**
+ * 检测单个工具的最新可用版本
+ * - antigravity：从官方 API 获取平台对应的 manifest
+ * - 其他工具：通过 npm view 查询 registry 中的最新版本
+ * @param {object} tool - 工具配置对象
+ * @returns {Promise<object>} { latest, error? }
+ */
 async function checkLatestVersion(tool) {
   if (tool.id === 'antigravity') {
     try {
@@ -389,6 +510,7 @@ async function checkLatestVersion(tool) {
       const manifest = await res.json();
       return { latest: manifest.version };
     } catch (err) {
+      // 平台特定 manifest 失败时，回退到 windows_amd64 兜底
       try {
         const res = await fetch('https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/windows_amd64.json');
         const manifest = await res.json();
@@ -399,6 +521,7 @@ async function checkLatestVersion(tool) {
     }
   }
 
+  // 普通 npm 工具：查询 registry 最新版本
   try {
     const output = await execCommand('npm', ['view', tool.pkg, 'version', `--registry=${currentRegistry}`], { shell: true });
     return { latest: output.trim() };
@@ -407,7 +530,11 @@ async function checkLatestVersion(tool) {
   }
 }
 
-// 检测单个工具（本地版本与远端版本并行）
+/**
+ * 检测单个工具的完整版本信息（本地 + 远端并行查询）
+ * @param {object} tool - 工具配置对象
+ * @returns {Promise<object>} 合并后的检测结果，包含 needsUpdate 标志
+ */
 async function checkTool(tool) {
   sendLog('info', tool.id, `正在检测 ${tool.name} ...`);
   const [local, remote] = await Promise.all([
@@ -421,13 +548,23 @@ async function checkTool(tool) {
     latestVersion: remote.latest,
     notFound: local.notFound,
     error: local.error || remote.error,
+    // 需要更新的条件：已安装 + 本地版本号提取成功 + 远端版本号获取成功 + 两者不一致
     needsUpdate: !!(local.installed && local.normalizedVersion && remote.latest && local.normalizedVersion !== remote.latest)
   };
   sendLog('success', tool.id, `${tool.name}: ${local.installed ? local.version : '未安装'} -> ${remote.latest || '检测失败'}`);
   return result;
 }
 
-// 执行单个工具的安装或更新（共用逻辑）
+// ===== 安装/更新执行 =====
+
+/**
+ * 执行单个工具的安装或更新（共用逻辑，npm install -g 同时适用于首次安装和升级）
+ * - Windows：通过 cmd.exe 执行
+ * - macOS/Linux：通过 sh -c 执行
+ * - antigravity：已安装时用 agy update，未安装时用官方脚本
+ * @param {string} toolId - 工具 ID
+ * @returns {Promise<object>} { success, code?, message? }
+ */
 async function doInstallOrUpdate(toolId) {
   const tools = getAllTools();
   const tool = tools.find(t => t.id === toolId);
@@ -441,6 +578,7 @@ async function doInstallOrUpdate(toolId) {
 
   if (isWin) {
     if (tool.id === 'antigravity') {
+      // antigravity 在 Windows 上需要区分已安装/未安装
       const localStatus = await checkLocalVersion(tool);
       if (localStatus.installed) {
         shellCmd = 'cmd.exe';
@@ -471,14 +609,17 @@ async function doInstallOrUpdate(toolId) {
 
   return new Promise((resolve, reject) => {
     const child = spawn(shellCmd, shellArgs, {
+      // 注入 NPM_CONFIG_REGISTRY 确保 npm 使用用户选择的镜像源
       env: { ...process.env, NPM_CONFIG_REGISTRY: currentRegistry }
     });
 
+    // 实时转发 stdout 到渲染进程日志
     child.stdout.on('data', (data) => {
       const text = data.toString();
       sendLog('data', tool.id, text);
     });
 
+    // 实时转发 stderr 到渲染进程日志
     child.stderr.on('data', (data) => {
       const text = data.toString();
       sendLog('data', tool.id, text);
@@ -502,12 +643,12 @@ async function doInstallOrUpdate(toolId) {
   });
 }
 
-// ===== IPC 处理程序 =====
+// ===== IPC 处理程序（主进程 ↔ 渲染进程通信） =====
 
-// 获取工具配置（内置 + 自定义，带当前镜像源）
+// 获取工具配置（内置 + 自定义，带当前镜像源生成的 updateCmd）
 ipcMain.handle('get-tools', () => getAllTools());
 
-// 批量检测版本（所有工具并行）
+// 批量检测所有工具版本（并行执行）
 ipcMain.handle('check-versions', async () => {
   const tools = getAllTools();
   return Promise.all(tools.map(checkTool));
@@ -531,7 +672,7 @@ ipcMain.handle('install-tool', async (event, toolId) => {
   return doInstallOrUpdate(toolId);
 });
 
-// 更新全部可更新工具
+// 更新全部可更新工具（串行执行，逐个返回结果）
 ipcMain.handle('update-all', async (event, toolIds) => {
   const results = [];
   for (const toolId of toolIds) {
@@ -547,10 +688,13 @@ ipcMain.handle('update-all', async (event, toolIds) => {
 
 // ===== 镜像源相关 IPC =====
 
+// 获取可用镜像源列表
 ipcMain.handle('get-registries', () => REGISTRIES);
 
+// 获取当前使用的镜像源 URL
 ipcMain.handle('get-current-registry', () => currentRegistry);
 
+// 切换镜像源并持久化保存
 ipcMain.handle('set-registry', (event, url) => {
   currentRegistry = url;
   saveSettings({ registry: url });
@@ -560,9 +704,12 @@ ipcMain.handle('set-registry', (event, url) => {
 
 // ===== 自定义工具 IPC =====
 
+/**
+ * 添加自定义工具并分配唯一 ID（custom_ + 时间戳）
+ * @param {object} toolConfig - { name, cmd, pkg, versionArg? }
+ */
 ipcMain.handle('add-custom-tool', (event, toolConfig) => {
   const custom = loadCustomTools();
-  // 生成唯一 id
   const id = 'custom_' + Date.now();
   const newTool = {
     id,
@@ -577,6 +724,7 @@ ipcMain.handle('add-custom-tool', (event, toolConfig) => {
   return { success: true, tool: newTool };
 });
 
+// 移除指定 ID 的自定义工具
 ipcMain.handle('remove-custom-tool', (event, toolId) => {
   let custom = loadCustomTools();
   const removed = custom.find(t => t.id === toolId);
@@ -590,6 +738,12 @@ ipcMain.handle('remove-custom-tool', (event, toolId) => {
 
 // ===== 环境健康检测 IPC =====
 
+/**
+ * 检测系统环境是否满足运行要求
+ * - 检查 Node.js 是否安装且版本 >= 18
+ * - 检查 npm 是否可用
+ * - 返回操作系统版本信息
+ */
 ipcMain.handle('check-environment', async () => {
   const result = { node: null, npm: null, os: null, errors: [] };
 
@@ -607,7 +761,7 @@ ipcMain.handle('check-environment', async () => {
     result.errors.push('未检测到 npm，请检查 Node.js 安装是否完整');
   }
 
-  // 获取 Windows 版本
+  // 获取 Windows 版本号
   try {
     result.os = `Windows ${os.release()}`;
   } catch {
@@ -627,6 +781,7 @@ ipcMain.handle('check-environment', async () => {
 
 // ===== 日志导出 IPC =====
 
+// 弹出保存对话框，将日志文本写入用户选择的文件
 ipcMain.handle('export-log', async (event, logText) => {
   const { filePath } = await dialog.showSaveDialog(mainWindow, {
     title: '导出日志',
@@ -641,6 +796,7 @@ ipcMain.handle('export-log', async (event, logText) => {
   return { success: false };
 });
 
+// 复制文本到剪贴板
 ipcMain.handle('copy-to-clipboard', (event, text) => {
   clipboard.writeText(text);
   return { success: true };
@@ -648,6 +804,7 @@ ipcMain.handle('copy-to-clipboard', (event, text) => {
 
 // ===== 管理员权限提示 IPC =====
 
+// 弹出对话框提示用户需要管理员权限（Windows 全局安装 npm 包时可能需要）
 ipcMain.handle('show-admin-tip', async () => {
   await dialog.showMessageBox(mainWindow, {
     type: 'info',
@@ -659,6 +816,10 @@ ipcMain.handle('show-admin-tip', async () => {
 
 // ===== 打开外部链接 IPC =====
 
+/**
+ * 使用系统默认浏览器打开外部链接
+ * - 仅允许 http/https 协议，防止恶意 URI 注入
+ */
 ipcMain.handle('open-external', async (event, url) => {
   try {
     const parsed = new URL(url);
@@ -676,13 +837,14 @@ ipcMain.handle('open-external', async (event, url) => {
 
 // ===== 设置 IPC =====
 
+// 获取当前所有设置
 ipcMain.handle('get-settings', () => {
   return loadSettings();
 });
 
+// 保存设置，如果后台检测间隔有变化则重启定时器
 ipcMain.handle('save-settings', (event, newSettings) => {
   saveSettings(newSettings);
-  // 如果后台检测间隔有变化，重新启动定时器
   if ('backgroundCheckHours' in newSettings) {
     startBackgroundCheck();
   }
@@ -690,9 +852,15 @@ ipcMain.handle('save-settings', (event, newSettings) => {
 });
 
 // ===== 一键配置 agyyolo 到 PowerShell Profile =====
+// agyyolo 是一个 PowerShell 函数，调用 agy --dangerously-skip-permissions
 
+// 要写入 PowerShell Profile 的函数体
 const AGYYOLO_FUNCTION_BODY = `function agyyolo {\n    agy --dangerously-skip-permissions\n}\n`;
 
+/**
+ * 获取所有可能的 PowerShell Profile 路径（兼容 Windows PowerShell 5.1 和 PowerShell 7+）
+ * @returns {string[]} Profile 文件路径数组
+ */
 function getPowerShellProfiles() {
   const home = os.homedir();
   return [
@@ -701,6 +869,11 @@ function getPowerShellProfiles() {
   ];
 }
 
+/**
+ * 确保 Profile 文件所在的目录和文件本身存在，不存在则创建
+ * @param {string} profilePath - Profile 文件路径
+ * @returns {string} 原样返回 profilePath（方便链式调用）
+ */
 function ensureProfile(profilePath) {
   const dir = path.dirname(profilePath);
   if (!fs.existsSync(dir)) {
@@ -712,6 +885,11 @@ function ensureProfile(profilePath) {
   return profilePath;
 }
 
+/**
+ * 将 agyyolo 函数写入指定的 PowerShell Profile（幂等，已存在则跳过）
+ * @param {string} profilePath - Profile 文件路径
+ * @returns {object} { ok: boolean, reason: string }
+ */
 function installAgyyoloToProfile(profilePath) {
   if (!profilePath) {
     return { ok: false, reason: 'Profile 路径为空' };
@@ -724,11 +902,18 @@ function installAgyyoloToProfile(profilePath) {
     return { ok: true, reason: '已存在，跳过' };
   }
 
+  // 如果文件末尾没有换行，先补两个换行再追加函数
   const ending = content && !content.endsWith('\n') ? '\n\n' : '';
   fs.writeFileSync(profilePath, content + ending + AGYYOLO_FUNCTION_BODY, 'utf-8');
   return { ok: true, reason: '已写入' };
 }
 
+/**
+ * IPC：一键将 agyyolo 配置到所有 PowerShell Profile
+ * - 先检测 agy 命令是否可用
+ * - 遍历所有 Profile 路径，逐个写入
+ * - 返回每个 Profile 的处理结果
+ */
 ipcMain.handle('install-agyyolo', async () => {
   // 先检测 agy 是否安装
   let agyFound = false;
@@ -748,7 +933,7 @@ ipcMain.handle('install-agyyolo', async () => {
   sendLog('info', 'system', 'agy 命令已找到，开始将 agyyolo 配置到 PowerShell Profile ...');
 
   const results = [];
-  const seen = new Set();
+  const seen = new Set(); // 去重（不同路径可能指向同一文件）
 
   for (const profilePath of getPowerShellProfiles()) {
     const key = profilePath.toLowerCase();
@@ -772,6 +957,12 @@ ipcMain.handle('install-agyyolo', async () => {
 
 // ===== 一键打开 PowerShell IPC =====
 
+/**
+ * 根据操作系统打开默认终端
+ * - Windows：打开 PowerShell
+ * - macOS：打开 Terminal（通过 osascript）
+ * - Linux：打开 x-terminal-emulator
+ */
 ipcMain.handle('open-powershell', async () => {
   const isWin = os.platform() === 'win32';
   const { spawn } = require('child_process');
@@ -779,17 +970,17 @@ ipcMain.handle('open-powershell', async () => {
   if (isWin) {
     try {
       const child = spawn('cmd.exe', ['/c', 'start powershell'], {
-        detached: true,
-        stdio: 'ignore'
+        detached: true,  // 分离子进程，不随主进程退出
+        stdio: 'ignore'  // 不继承 stdio，避免阻塞主进程
       });
-      child.unref();
+      child.unref(); // 让子进程独立运行
       return { success: true };
     } catch (err) {
       return { success: false, error: err.message };
     }
   } else {
-    // macOS or Linux
     if (os.platform() === 'darwin') {
+      // macOS：通过 AppleScript 打开 Terminal
       try {
         const child = spawn('osascript', ['-e', 'tell application "Terminal" to do script ""', '-e', 'tell application "Terminal" to activate'], {
           detached: true,
@@ -801,7 +992,7 @@ ipcMain.handle('open-powershell', async () => {
         return { success: false, error: err.message };
       }
     } else {
-      // Linux
+      // Linux：尝试打开默认终端模拟器
       try {
         const child = spawn('x-terminal-emulator', [], {
           detached: true,
@@ -815,4 +1006,3 @@ ipcMain.handle('open-powershell', async () => {
     }
   }
 });
-
