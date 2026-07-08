@@ -50,6 +50,7 @@ const BUILTIN_TOOLS = [
   { id: 'codebuddy', name: 'CodeBuddy', cmd: 'codebuddy', pkg: '@tencent-ai/codebuddy-code', versionArg: '--version' },
   { id: 'qwen', name: 'Qwen Code', cmd: 'qwen', pkg: '@qwen-code/qwen-code', versionArg: '--version' },
   { id: 'antigravity', name: 'Antigravity CLI', cmd: 'agy', versionArg: '--version' },
+  { id: 'atomcode', name: 'AtomCode', cmd: 'atomcode', versionArg: '--version' },
 ];
 
 // ===== 自定义工具持久化 =====
@@ -84,6 +85,12 @@ function getAllTools() {
         updateCmd = 'powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://antigravity.google/cli/install.ps1 | iex"';
       } else {
         updateCmd = 'curl -sSL https://antigravity.google/cli/install.sh | bash';
+      }
+    } else if (t.id === 'atomcode') {
+      if (os.platform() === 'win32') {
+        updateCmd = 'powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/install.ps1 | iex"';
+      } else {
+        updateCmd = 'curl -fsSL https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/install.sh | sh';
       }
     } else if (t.pkg) {
       updateCmd = `npm install -g ${t.pkg}@latest --registry=${currentRegistry}`;
@@ -344,6 +351,23 @@ function isCommandNotFound(err) {
 
 // 检测单个工具的本地版本
 async function checkLocalVersion(tool) {
+  // AtomCode 在 Windows 上安装到用户目录，可能不在 PATH，需要先尝试全路径
+  if (tool.id === 'atomcode' && os.platform() === 'win32') {
+    const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+    const fullPath = path.join(localAppData, 'AtomCode', 'atomcode.exe');
+    const exists = fs.existsSync(fullPath);
+    sendLog('info', 'atomcode', `检测本地路径: ${fullPath} (是否存在: ${exists})`);
+    if (exists) {
+      try {
+        const output = await execCommand(fullPath, [tool.versionArg], { shell: false });
+        const version = output.split(/\r?\n/)[0].trim();
+        sendLog('info', 'atomcode', `检测到本地版本: ${version}`);
+        return { installed: true, version, normalizedVersion: extractVersionNumber(version) };
+      } catch (err) {
+        sendLog('error', 'atomcode', `执行全路径检测失败: ${err.message}`);
+      }
+    }
+  }
   try {
     const output = await execCommand(tool.cmd, [tool.versionArg], { shell: true });
     const version = output.split(/\r?\n/)[0].trim();
@@ -399,6 +423,22 @@ async function checkLatestVersion(tool) {
     }
   }
 
+  // AtomCode 通过 AtomGit API 获取线上最新 release 版本
+  if (tool.id === 'atomcode') {
+    try {
+      const res = await fetch('https://api.atomgit.com/api/v5/repos/atomgit_atomcode/atomcode/releases/latest', {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+      });
+      if (!res.ok) {
+        throw new Error(`HTTP error! status: ${res.status}`);
+      }
+      const data = await res.json();
+      return { latest: data.tag_name || 'v4.25.9' };
+    } catch (err) {
+      return { latest: null, error: err.message };
+    }
+  }
+
   try {
     const output = await execCommand('npm', ['view', tool.pkg, 'version', `--registry=${currentRegistry}`], { shell: true });
     return { latest: output.trim() };
@@ -421,7 +461,7 @@ async function checkTool(tool) {
     latestVersion: remote.latest,
     notFound: local.notFound,
     error: local.error || remote.error,
-    needsUpdate: !!(local.installed && local.normalizedVersion && remote.latest && local.normalizedVersion !== remote.latest)
+    needsUpdate: !!(local.installed && local.normalizedVersion && remote.latest && local.normalizedVersion !== extractVersionNumber(remote.latest))
   };
   sendLog('success', tool.id, `${tool.name}: ${local.installed ? local.version : '未安装'} -> ${remote.latest || '检测失败'}`);
   return result;
@@ -449,6 +489,22 @@ async function doInstallOrUpdate(toolId) {
         shellCmd = 'powershell.exe';
         shellArgs = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', 'irm https://antigravity.google/cli/install.ps1 | iex'];
       }
+    } else if (tool.id === 'atomcode') {
+      shellCmd = 'powershell.exe';
+      // 先强制结束正在运行的 atomcode.exe（否则安装脚本无法覆盖文件），再安装，最后写 PATH
+      shellArgs = [
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
+        `Write-Host '[AtomCode] Stopping running atomcode process...'; ` +
+        `taskkill /f /im atomcode.exe 2>$null | Out-Null; ` +
+        `Start-Sleep -Milliseconds 800; ` +
+        `irm https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/install.ps1 | iex; ` +
+        `$atomDir = Join-Path $env:LOCALAPPDATA 'AtomCode'; ` +
+        `$userPath = [Environment]::GetEnvironmentVariable('PATH', 'User'); ` +
+        `if ($userPath -notlike "*$atomDir*") { ` +
+        `  [Environment]::SetEnvironmentVariable('PATH', "$userPath;$atomDir", 'User'); ` +
+        `  Write-Host '[AtomCode] Added atomcode dir to user PATH' ` +
+        `}`
+      ];
     } else {
       shellCmd = 'cmd.exe';
       shellArgs = ['/c', tool.updateCmd];
@@ -463,6 +519,9 @@ async function doInstallOrUpdate(toolId) {
         shellCmd = 'sh';
         shellArgs = ['-c', 'curl -sSL https://antigravity.google/cli/install.sh | bash'];
       }
+    } else if (tool.id === 'atomcode') {
+      shellCmd = 'sh';
+      shellArgs = ['-c', 'curl -fsSL https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/install.sh | sh'];
     } else {
       shellCmd = 'sh';
       shellArgs = ['-c', tool.updateCmd];

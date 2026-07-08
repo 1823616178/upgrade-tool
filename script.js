@@ -181,7 +181,7 @@ async function saveCustomTool() {
 // ===== 渲染骨架屏 =====
 function renderSkeleton() {
   toolsGrid.innerHTML = '';
-  const names = ['Kimi Code', 'Claude Code', 'OpenAI Codex', 'OpenCode', 'CodeBuddy', 'Qwen Code', 'Antigravity CLI'];
+  const names = ['Kimi Code', 'Claude Code', 'OpenAI Codex', 'OpenCode', 'CodeBuddy', 'Qwen Code', 'Antigravity CLI', 'AtomCode'];
   for (const name of names) {
     const card = document.createElement('div');
     card.className = 'tool-card';
@@ -227,7 +227,7 @@ function renderTools() {
     if (tool.notFound) {
       statusClass = 'status-not-installed';
       statusText = '未安装';
-      canInstall = true; // 未安装的工具可以一键安装
+      canInstall = true;
     } else if (tool.error && !tool.installed) {
       statusClass = 'status-error';
       statusText = '检测失败';
