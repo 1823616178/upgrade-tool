@@ -235,6 +235,8 @@ function renderTools() {
     } else if (tool.error && !tool.installed) {
       statusClass = 'status-error';
       statusText = '检测失败';
+      canInstall = true; // 检测失败且未安装，也允许安装（可能只是命令不存在检测未匹配）
+      installCount++;
     } else if (tool.needsUpdate) {
       statusClass = 'status-update';
       statusText = '可更新';
@@ -446,42 +448,56 @@ async function updateAll() {
 
   if (isUpdating) return;
   isUpdating = true;
-  updateUIState(true);
 
   appendLog('start', 'system', `开始一键更新 ${ids.length} 个工具...`);
 
   try {
-    await window.electronAPI.updateAll(ids);
+    for (const toolId of ids) {
+      updateUIState(true, toolId);
+      appendLog('start', toolId, `开始更新 ${getToolName(toolId)} ...`);
+      const result = await window.electronAPI.updateTool(toolId);
+      if (!result.success) {
+        appendLog('error', toolId, result.message || '更新失败');
+      }
+      await refreshSingleTool(toolId);
+    }
     appendLog('success', 'system', '全部更新任务执行完毕');
   } catch (err) {
     appendLog('error', 'system', `一键更新异常: ${err.message}`);
   } finally {
     isUpdating = false;
     updateUIState(false);
-    await checkVersions();
+    await silentRefreshAll();
   }
 }
 
 // ===== 一键安装全部未安装工具 =====
 async function installAll() {
-  const ids = toolsData.filter(t => t.notFound).map(t => t.id);
+  const ids = toolsData.filter(t => !t.installed).map(t => t.id);
   if (ids.length === 0) return;
 
   if (isUpdating) return;
   isUpdating = true;
-  updateUIState(true);
 
   appendLog('start', 'system', `开始一键安装 ${ids.length} 个工具...`);
 
   try {
-    await window.electronAPI.installAll(ids);
+    for (const toolId of ids) {
+      updateUIState(true, toolId);
+      appendLog('start', toolId, `开始安装 ${getToolName(toolId)} ...`);
+      const result = await window.electronAPI.installTool(toolId);
+      if (!result.success) {
+        appendLog('error', toolId, result.message || '安装失败');
+      }
+      await refreshSingleTool(toolId);
+    }
     appendLog('success', 'system', '全部安装任务执行完毕');
   } catch (err) {
     appendLog('error', 'system', `一键安装异常: ${err.message}`);
   } finally {
     isUpdating = false;
     updateUIState(false);
-    await checkVersions();
+    await silentRefreshAll();
   }
 }
 
@@ -499,10 +515,21 @@ async function refreshSingleTool(toolId) {
   }
 }
 
+// 静默刷新所有工具版本（不清空日志）
+async function silentRefreshAll() {
+  try {
+    toolsData = await window.electronAPI.checkVersions();
+    renderTools();
+  } catch (err) {
+    appendLog('error', 'system', `刷新版本失败: ${err.message}`);
+  }
+}
+
 // ===== UI 状态更新 =====
 function updateUIState(updating, activeToolId) {
   btnCheck.disabled = updating;
   btnUpdateAll.disabled = updating;
+  if (btnInstallAll) btnInstallAll.disabled = updating;
 
   document.querySelectorAll('.tool-card').forEach(card => {
     const id = card.dataset.id;
@@ -515,6 +542,8 @@ function updateUIState(updating, activeToolId) {
         status.className = 'tool-status status-updating';
         status.textContent = '执行中';
       }
+    } else if (!updating) {
+      card.classList.remove('updating');
     }
 
     if (btn) {

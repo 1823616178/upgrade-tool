@@ -570,6 +570,12 @@ async function doInstallOrUpdate(toolId) {
   const tool = tools.find(t => t.id === toolId);
   if (!tool) throw new Error('未知工具');
 
+  // 校验：非 antigravity 工具必须有 updateCmd（即必须配置了 npm 包名）
+  if (tool.id !== 'antigravity' && !tool.updateCmd) {
+    sendLog('error', toolId, `${tool.name} 缺少安装命令（未配置 npm 包名）`);
+    return { success: false, message: '缺少安装命令（未配置 npm 包名）' };
+  }
+
   sendLog('start', tool.id, `开始安装/更新 ${tool.name} ...`);
 
   const isWin = os.platform() === 'win32';
@@ -613,6 +619,17 @@ async function doInstallOrUpdate(toolId) {
       env: { ...process.env, NPM_CONFIG_REGISTRY: currentRegistry }
     });
 
+    // 安装/更新超时保护（5 分钟），防止子进程挂起导致 UI 锁死
+    let settled = false;
+    const INSTALL_TIMEOUT = 5 * 60 * 1000;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill();
+      sendLog('error', tool.id, `操作超时（${INSTALL_TIMEOUT / 1000}s），已终止子进程`);
+      resolve({ success: false, message: '操作超时' });
+    }, INSTALL_TIMEOUT);
+
     // 实时转发 stdout 到渲染进程日志
     child.stdout.on('data', (data) => {
       const text = data.toString();
@@ -626,11 +643,17 @@ async function doInstallOrUpdate(toolId) {
     });
 
     child.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
       sendLog('error', tool.id, `操作失败: ${err.message}`);
       reject(err);
     });
 
     child.on('close', (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
       if (code === 0) {
         sendLog('success', tool.id, `${tool.name} 操作完成`);
         resolve({ success: true });
