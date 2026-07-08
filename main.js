@@ -672,6 +672,20 @@ ipcMain.handle('install-tool', async (event, toolId) => {
   return doInstallOrUpdate(toolId);
 });
 
+// 批量安装未安装的工具（串行执行，避免并发 npm 全局安装冲突）
+ipcMain.handle('install-all', async (event, toolIds) => {
+  const results = [];
+  for (const toolId of toolIds) {
+    try {
+      const result = await doInstallOrUpdate(toolId);
+      results.push({ toolId, ...result });
+    } catch (err) {
+      results.push({ toolId, success: false, message: err.message });
+    }
+  }
+  return results;
+});
+
 // 更新全部可更新工具（串行执行，逐个返回结果）
 ipcMain.handle('update-all', async (event, toolIds) => {
   const results = [];
