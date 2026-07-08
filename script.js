@@ -8,6 +8,7 @@ const toolsGrid = document.getElementById('tools-grid');
 const logContainer = document.getElementById('log-container');
 const btnCheck = document.getElementById('btn-check');
 const btnUpdateAll = document.getElementById('btn-update-all');
+const btnInstallAll = document.getElementById('btn-install-all');
 const btnAdmin = document.getElementById('btn-admin');
 const btnClearLog = document.getElementById('btn-clear-log');
 const btnCopyLog = document.getElementById('btn-copy-log');
@@ -53,6 +54,7 @@ async function init() {
 function bindEvents() {
   btnCheck.addEventListener('click', checkVersions);
   btnUpdateAll.addEventListener('click', updateAll);
+  btnInstallAll.addEventListener('click', installAll);
   btnAdmin.addEventListener('click', () => window.electronAPI.showAdminTip());
   btnInstallAgyyolo.addEventListener('click', installAgyyolo);
   btnOpenPowerShell.addEventListener('click', openPowerShell);
@@ -96,8 +98,8 @@ async function checkEnvironment() {
 
     // 展示环境信息到 footer
     if (envNode) envNode.textContent = `Node: ${env.node || '未安装'}`;
-    if (envNpm)  envNpm.textContent  = `npm: ${env.npm   || '未安装'}`;
-    if (envOs)   envOs.textContent   = env.os || 'OS: 未知';
+    if (envNpm) envNpm.textContent = `npm: ${env.npm || '未安装'}`;
+    if (envOs) envOs.textContent = env.os || 'OS: 未知';
 
     // 如果有错误，显示警告横幅
     if (env.errors && env.errors.length > 0) {
@@ -213,6 +215,7 @@ function renderSkeleton() {
 function renderTools() {
   toolsGrid.innerHTML = '';
   let updateCount = 0;
+  let installCount = 0;
 
   for (const tool of toolsData) {
     const card = document.createElement('div');
@@ -227,10 +230,13 @@ function renderTools() {
     if (tool.notFound) {
       statusClass = 'status-not-installed';
       statusText = '未安装';
-      canInstall = true;
+      canInstall = true; // 未安装的工具可以一键安装
+      installCount++;
     } else if (tool.error && !tool.installed) {
       statusClass = 'status-error';
       statusText = '检测失败';
+      canInstall = true; // 检测失败且未安装，也允许安装（可能只是命令不存在检测未匹配）
+      installCount++;
     } else if (tool.needsUpdate) {
       statusClass = 'status-update';
       statusText = '可更新';
@@ -313,6 +319,8 @@ function renderTools() {
   });
 
   btnUpdateAll.disabled = updateCount === 0 || isUpdating;
+  // 当有未安装工具且不在更新状态时，启用一键安装
+  if (btnInstallAll) btnInstallAll.disabled = installCount === 0 || isUpdating;
 }
 
 // ===== 检测版本 =====
@@ -440,19 +448,56 @@ async function updateAll() {
 
   if (isUpdating) return;
   isUpdating = true;
-  updateUIState(true);
 
   appendLog('start', 'system', `开始一键更新 ${ids.length} 个工具...`);
 
   try {
-    await window.electronAPI.updateAll(ids);
+    for (const toolId of ids) {
+      updateUIState(true, toolId);
+      appendLog('start', toolId, `开始更新 ${getToolName(toolId)} ...`);
+      const result = await window.electronAPI.updateTool(toolId);
+      if (!result.success) {
+        appendLog('error', toolId, result.message || '更新失败');
+      }
+      await refreshSingleTool(toolId);
+    }
     appendLog('success', 'system', '全部更新任务执行完毕');
   } catch (err) {
     appendLog('error', 'system', `一键更新异常: ${err.message}`);
   } finally {
     isUpdating = false;
     updateUIState(false);
-    await checkVersions();
+    await silentRefreshAll();
+  }
+}
+
+// ===== 一键安装全部未安装工具 =====
+async function installAll() {
+  const ids = toolsData.filter(t => !t.installed).map(t => t.id);
+  if (ids.length === 0) return;
+
+  if (isUpdating) return;
+  isUpdating = true;
+
+  appendLog('start', 'system', `开始一键安装 ${ids.length} 个工具...`);
+
+  try {
+    for (const toolId of ids) {
+      updateUIState(true, toolId);
+      appendLog('start', toolId, `开始安装 ${getToolName(toolId)} ...`);
+      const result = await window.electronAPI.installTool(toolId);
+      if (!result.success) {
+        appendLog('error', toolId, result.message || '安装失败');
+      }
+      await refreshSingleTool(toolId);
+    }
+    appendLog('success', 'system', '全部安装任务执行完毕');
+  } catch (err) {
+    appendLog('error', 'system', `一键安装异常: ${err.message}`);
+  } finally {
+    isUpdating = false;
+    updateUIState(false);
+    await silentRefreshAll();
   }
 }
 
@@ -470,10 +515,21 @@ async function refreshSingleTool(toolId) {
   }
 }
 
+// 静默刷新所有工具版本（不清空日志）
+async function silentRefreshAll() {
+  try {
+    toolsData = await window.electronAPI.checkVersions();
+    renderTools();
+  } catch (err) {
+    appendLog('error', 'system', `刷新版本失败: ${err.message}`);
+  }
+}
+
 // ===== UI 状态更新 =====
 function updateUIState(updating, activeToolId) {
   btnCheck.disabled = updating;
   btnUpdateAll.disabled = updating;
+  if (btnInstallAll) btnInstallAll.disabled = updating;
 
   document.querySelectorAll('.tool-card').forEach(card => {
     const id = card.dataset.id;
@@ -486,6 +542,8 @@ function updateUIState(updating, activeToolId) {
         status.className = 'tool-status status-updating';
         status.textContent = '执行中';
       }
+    } else if (!updating) {
+      card.classList.remove('updating');
     }
 
     if (btn) {
