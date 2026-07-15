@@ -18,6 +18,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 安装单个工具（首次安装）
   installTool: (toolId) => ipcRenderer.invoke('install-tool', toolId),
 
+  // 卸载单个工具
+  uninstallTool: (toolId) => ipcRenderer.invoke('uninstall-tool', toolId),
+
   // 更新多个工具
   updateAll: (toolIds) => ipcRenderer.invoke('update-all', toolIds),
 

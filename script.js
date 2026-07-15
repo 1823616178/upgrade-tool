@@ -183,7 +183,7 @@ async function saveCustomTool() {
 // ===== 渲染骨架屏 =====
 function renderSkeleton() {
   toolsGrid.innerHTML = '';
-  const names = ['Kimi Code', 'Claude Code', 'OpenAI Codex', 'OpenCode', 'CodeBuddy', 'Qwen Code', 'Antigravity CLI', 'AtomCode'];
+  const names = ['Kimi Code', 'Claude Code', 'OpenAI Codex', 'OpenCode', 'CodeBuddy', 'Qwen Code', 'Antigravity CLI', 'AtomCode', 'Qoder CLI', 'Qoder CLI (国内镜像)', 'Grok CLI'];
   for (const name of names) {
     const card = document.createElement('div');
     card.className = 'tool-card';
@@ -248,6 +248,7 @@ function renderTools() {
     } else if (tool.installed) {
       statusClass = 'status-error';
       statusText = '远端检测失败';
+      canUpdate = true; // 无法自动比对版本时，仍允许手动重新执行安装/更新脚本
     }
 
     // 动作按钮：更新 / 安装 / 禁用
@@ -258,6 +259,12 @@ function renderTools() {
       actionBtn = `<button class="btn btn-success btn-install btn-sm" data-id="${tool.id}" ${isUpdating ? 'disabled' : ''}>安装</button>`;
     } else {
       actionBtn = `<button class="btn btn-primary btn-sm" disabled>已是最新</button>`;
+    }
+
+    // 已安装的工具附加卸载按钮
+    let uninstallBtn = '';
+    if (tool.installed) {
+      uninstallBtn = `<button class="btn btn-danger-ghost btn-uninstall btn-sm" data-id="${tool.id}" ${isUpdating ? 'disabled' : ''}>卸载</button>`;
     }
 
     // 自定义工具附加删除按钮
@@ -287,6 +294,7 @@ function renderTools() {
       </div>
       <div class="tool-actions">
         ${actionBtn}
+        ${uninstallBtn}
         ${removeBtn}
       </div>
     `;
@@ -307,6 +315,14 @@ function renderTools() {
     btn.addEventListener('click', (e) => {
       const id = e.currentTarget.dataset.id;
       installTool(id);
+    });
+  });
+
+  // 绑定卸载按钮
+  document.querySelectorAll('.btn-uninstall').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const id = e.currentTarget.dataset.id;
+      uninstallTool(id);
     });
   });
 
@@ -427,6 +443,30 @@ async function openPowerShell() {
   }
 }
 
+// ===== 卸载单个工具 =====
+async function uninstallTool(toolId) {
+  if (isUpdating) return;
+  const name = getToolName(toolId);
+  if (!confirm(`确定要卸载 ${name} 吗？`)) return;
+
+  isUpdating = true;
+  updateUIState(true, toolId);
+
+  try {
+    appendLog('start', toolId, `开始卸载 ${name} ...`);
+    const result = await window.electronAPI.uninstallTool(toolId);
+    if (!result.success) {
+      appendLog('error', toolId, result.message || '卸载失败');
+    }
+  } catch (err) {
+    appendLog('error', toolId, `卸载异常: ${err.message}`);
+  } finally {
+    isUpdating = false;
+    updateUIState(false);
+    await refreshSingleTool(toolId);
+  }
+}
+
 // ===== 移除自定义工具 =====
 async function removeCustomTool(toolId) {
   const name = getToolName(toolId);
@@ -533,7 +573,7 @@ function updateUIState(updating, activeToolId) {
 
   document.querySelectorAll('.tool-card').forEach(card => {
     const id = card.dataset.id;
-    const btn = card.querySelector('.btn-update, .btn-install');
+    const btns = card.querySelectorAll('.btn-update, .btn-install, .btn-uninstall');
     const status = card.querySelector('.tool-status');
 
     if (updating && activeToolId && id === activeToolId) {
@@ -546,9 +586,7 @@ function updateUIState(updating, activeToolId) {
       card.classList.remove('updating');
     }
 
-    if (btn) {
-      btn.disabled = updating;
-    }
+    btns.forEach(btn => { btn.disabled = updating; });
   });
 }
 

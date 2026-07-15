@@ -71,6 +71,11 @@ const BUILTIN_TOOLS = [
   // antigravity 使用独立的安装脚本，不通过 npm 安装
   { id: 'antigravity', name: 'Antigravity CLI', cmd: 'agy', versionArg: '--version' },
   { id: 'atomcode', name: 'AtomCode', cmd: 'atomcode', versionArg: '--version' },
+  { id: 'qoder', name: 'Qoder CLI', cmd: 'qodercli', pkg: '@qoder-ai/qodercli', versionArg: '--version' },
+  // qoder_cn 安装的是 qoderclicn 命令，与国际版 qodercli 不同
+  { id: 'qoder_cn', name: 'Qoder CLI (国内镜像)', cmd: 'qoderclicn', versionArg: '--version' },
+  // grok 使用 xAI 官方安装脚本，不通过 npm 安装
+  { id: 'grok', name: 'Grok CLI', cmd: 'grok', versionArg: '--version' },
 ];
 
 // ===== 自定义工具持久化 =====
@@ -131,6 +136,24 @@ function getAllTools() {
         updateCmd = 'powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/install.ps1 | iex"';
       } else {
         updateCmd = 'curl -fsSL https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/install.sh | sh';
+      }
+    } else if (t.id === 'qoder') {
+      if (os.platform() === 'win32') {
+        updateCmd = 'powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://qoder.com/install.ps1 | iex"';
+      } else {
+        updateCmd = 'curl -fsSL https://qoder.com/install | bash';
+      }
+    } else if (t.id === 'qoder_cn') {
+      if (os.platform() === 'win32') {
+        updateCmd = 'powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://qoder.com.cn/install.ps1 | iex"';
+      } else {
+        updateCmd = 'curl -fsSL https://qoder.com.cn/install | bash';
+      }
+    } else if (t.id === 'grok') {
+      if (os.platform() === 'win32') {
+        updateCmd = 'powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://x.ai/cli/install.ps1 | iex"';
+      } else {
+        updateCmd = 'curl -fsSL https://x.ai/cli/install | bash';
       }
     } else if (t.pkg) {
       // 普通 npm 全局安装命令，镜像源从当前配置动态拼接
@@ -444,7 +467,8 @@ function extractVersionNumber(text) {
  */
 function isCommandNotFound(err) {
   if (!err) return false;
-  if (err.exitCode === 127) return true; // ENOENT 或 shell 的标准"命令未找到"退出码
+  // 127: POSIX 标准"命令未找到"退出码；9009 (0x2331): Windows cmd.exe 找不到命令时的退出码
+  if (err.exitCode === 127 || err.exitCode === 9009) return true;
   const msg = err.message || '';
   if (os.platform() === 'win32') {
     // Windows 中文系统返回"不是内部或外部命令"
@@ -478,6 +502,33 @@ async function checkLocalVersion(tool) {
       }
     }
   }
+  if (tool.id === 'qoder') {
+    // 国际版：先试 qodercli，再试 qoder
+    try {
+      const output = await execCommand('qodercli', [tool.versionArg], { shell: true });
+      const version = output.split(/\r?\n/)[0].trim();
+      return { installed: true, version, normalizedVersion: extractVersionNumber(version) };
+    } catch (err) {
+      try {
+        const output = await execCommand('qoder', [tool.versionArg], { shell: true });
+        const version = output.split(/\r?\n/)[0].trim();
+        return { installed: true, version, normalizedVersion: extractVersionNumber(version) };
+      } catch (innerErr) {
+        return { installed: false, version: null, normalizedVersion: null, notFound: isCommandNotFound(innerErr), error: innerErr.message };
+      }
+    }
+  }
+  if (tool.id === 'qoder_cn') {
+    // 国内镜像版：安装的是 qoderclicn 命令
+    try {
+      const output = await execCommand('qoderclicn', [tool.versionArg], { shell: true });
+      const version = output.split(/\r?\n/)[0].trim();
+      return { installed: true, version, normalizedVersion: extractVersionNumber(version) };
+    } catch (innerErr) {
+      return { installed: false, version: null, normalizedVersion: null, notFound: isCommandNotFound(innerErr), error: innerErr.message };
+    }
+  }
+
   try {
     const output = await execCommand(tool.cmd, [tool.versionArg], { shell: true });
     const version = output.split(/\r?\n/)[0].trim();
@@ -561,6 +612,46 @@ async function checkLatestVersion(tool) {
     }
   }
 
+  // qoder_cn 国内版：从官方 manifest 获取最新版本（binary 为 qoderclicn）
+  if (tool.id === 'qoder_cn') {
+    try {
+      const res = await fetch('https://static.qoder.com.cn/qoder-cli-cn/channels/manifest.json');
+      if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+      const manifest = await res.json();
+      return { latest: manifest.latest };
+    } catch (err) {
+      return { latest: null, error: err.message };
+    }
+  }
+
+  // qoder 国际版：从官方 manifest 获取最新版本（binary 为 qodercli）
+  // 注意：不回退到 npm registry —— npm 包 @qoder-ai/qodercli 与原生安装包是两条独立的版本线，
+  // 版本号不可比较，回退会导致把不相关的旧版本号误判为"有更新"
+  // 官方 install.ps1 的 BASE_URL 为阿里云 OSS 加速域名，manifest 路径为 ${BASE_URL}/channels/manifest.json
+  if (tool.id === 'qoder') {
+    const manifestUrls = [
+      'https://qoder-ide.oss-accelerate.aliyuncs.com/qodercli/channels/manifest.json',
+      'https://static.qoder.com/qodercli/channels/manifest.json',
+    ];
+    let lastErr = null;
+    for (const url of manifestUrls) {
+      try {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+        const manifest = await res.json();
+        if (manifest && manifest.latest) return { latest: manifest.latest };
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    return { latest: null, error: (lastErr && lastErr.message) || 'qoder 国际版 manifest 获取失败' };
+  }
+
+  // grok：xAI 官方安装脚本模式，暂无已知的公开版本清单接口，无法自动比对最新版本
+  if (tool.id === 'grok') {
+    return { latest: null, error: '暂无版本清单接口，无法自动检测最新版本，可手动点击更新重新执行安装脚本' };
+  }
+
   // 普通 npm 工具：查询 registry 最新版本
   try {
     const output = await execCommand('npm', ['view', tool.pkg, 'version', `--registry=${currentRegistry}`], { shell: true });
@@ -591,7 +682,10 @@ async function checkTool(tool) {
     // 需要更新的条件：已安装 + 本地版本号提取成功 + 远端版本号获取成功 + 两者不一致
     needsUpdate: !!(local.installed && local.normalizedVersion && remote.latest && local.normalizedVersion !== extractVersionNumber(remote.latest))
   };
-  sendLog('success', tool.id, `${tool.name}: ${local.installed ? local.version : '未安装'} -> ${remote.latest || '检测失败'}`);
+  const remoteDesc = remote.latest
+    ? remote.latest
+    : (remote.error ? `无远端信息 (${remote.error.slice(0, 30)})` : '检测失败');
+  sendLog('success', tool.id, `${tool.name}: ${local.installed ? local.version : '未安装'} -> ${remoteDesc}`);
   return result;
 }
 
@@ -623,6 +717,15 @@ async function doInstallOrUpdate(toolId) {
   let shellArgs;
 
   if (isWin) {
+    let powershellCmd = 'powershell.exe';
+    const sysnative = path.join(process.env.WINDIR || 'C:\\Windows', 'sysnative', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+    const system32 = path.join(process.env.WINDIR || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+    if (fs.existsSync(sysnative)) {
+      powershellCmd = sysnative;
+    } else if (fs.existsSync(system32)) {
+      powershellCmd = system32;
+    }
+
     if (tool.id === 'antigravity') {
       // antigravity 在 Windows 上需要区分已安装/未安装
       const localStatus = await checkLocalVersion(tool);
@@ -630,18 +733,18 @@ async function doInstallOrUpdate(toolId) {
         shellCmd = 'cmd.exe';
         shellArgs = ['/c', 'agy update'];
       } else {
-        shellCmd = 'powershell.exe';
-        shellArgs = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', 'irm https://antigravity.google/cli/install.ps1 | iex'];
+        shellCmd = powershellCmd;
+        shellArgs = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', 'Import-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue; irm https://antigravity.google/cli/install.ps1 | iex'];
       }
     } else if (tool.id === 'atomcode') {
-      shellCmd = 'powershell.exe';
+      shellCmd = powershellCmd;
       // 先强制结束正在运行的 atomcode.exe（否则安装脚本无法覆盖文件），再安装，最后写 PATH
       shellArgs = [
         '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
         `Write-Host '[AtomCode] Stopping running atomcode process...'; ` +
         `taskkill /f /im atomcode.exe 2>$null | Out-Null; ` +
         `Start-Sleep -Milliseconds 800; ` +
-        `irm https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/install.ps1 | iex; ` +
+        `Import-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue; irm https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/install.ps1 | iex; ` +
         `$atomDir = Join-Path $env:LOCALAPPDATA 'AtomCode'; ` +
         `$userPath = [Environment]::GetEnvironmentVariable('PATH', 'User'); ` +
         `if ($userPath -notlike "*$atomDir*") { ` +
@@ -649,6 +752,15 @@ async function doInstallOrUpdate(toolId) {
         `  Write-Host '[AtomCode] Added atomcode dir to user PATH' ` +
         `}`
       ];
+    } else if (tool.id === 'qoder') {
+      shellCmd = powershellCmd;
+      shellArgs = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', 'Import-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue; irm https://qoder.com/install.ps1 | iex'];
+    } else if (tool.id === 'qoder_cn') {
+      shellCmd = powershellCmd;
+      shellArgs = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', 'Import-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue; irm https://qoder.com.cn/install.ps1 | iex'];
+    } else if (tool.id === 'grok') {
+      shellCmd = powershellCmd;
+      shellArgs = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', 'Import-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue; irm https://x.ai/cli/install.ps1 | iex'];
     } else {
       shellCmd = 'cmd.exe';
       shellArgs = ['/c', tool.updateCmd];
@@ -666,16 +778,42 @@ async function doInstallOrUpdate(toolId) {
     } else if (tool.id === 'atomcode') {
       shellCmd = 'sh';
       shellArgs = ['-c', 'curl -fsSL https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/install.sh | sh'];
+    } else if (tool.id === 'qoder') {
+      shellCmd = 'sh';
+      shellArgs = ['-c', 'curl -fsSL https://qoder.com/install | bash'];
+    } else if (tool.id === 'qoder_cn') {
+      shellCmd = 'sh';
+      shellArgs = ['-c', 'curl -fsSL https://qoder.com.cn/install | bash'];
+    } else if (tool.id === 'grok') {
+      shellCmd = 'sh';
+      shellArgs = ['-c', 'curl -fsSL https://x.ai/cli/install | bash'];
     } else {
       shellCmd = 'sh';
       shellArgs = ['-c', tool.updateCmd];
     }
   }
 
+  const childEnv = { ...process.env, NPM_CONFIG_REGISTRY: currentRegistry };
+  if (isWin) {
+    const systemRoot = process.env.SystemRoot || 'C:\\Windows';
+    const defaultModulesPath = path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'Modules');
+    const wow64ModulesPath = path.join(systemRoot, 'SysWOW64', 'WindowsPowerShell', 'v1.0', 'Modules');
+    const extraPaths = [defaultModulesPath, wow64ModulesPath];
+    
+    if (childEnv.PSModulePath) {
+      for (const p of extraPaths) {
+        if (!childEnv.PSModulePath.toLowerCase().includes(p.toLowerCase())) {
+          childEnv.PSModulePath = `${childEnv.PSModulePath};${p}`;
+        }
+      }
+    } else {
+      childEnv.PSModulePath = extraPaths.join(';');
+    }
+  }
+
   return new Promise((resolve, reject) => {
     const child = spawn(shellCmd, shellArgs, {
-      // 注入 NPM_CONFIG_REGISTRY 确保 npm 使用用户选择的镜像源
-      env: { ...process.env, NPM_CONFIG_REGISTRY: currentRegistry }
+      env: childEnv
     });
 
     // 安装/更新超时保护（5 分钟），防止子进程挂起导致 UI 锁死
@@ -725,6 +863,84 @@ async function doInstallOrUpdate(toolId) {
   });
 }
 
+// ===== 卸载执行 =====
+
+// 通过官方安装脚本安装的工具，没有统一的自动卸载命令，需用户手动卸载
+const SCRIPT_INSTALLED_TOOL_IDS = ['antigravity', 'atomcode', 'qoder', 'qoder_cn', 'grok'];
+
+/**
+ * 执行单个工具的卸载
+ * - npm 安装的工具：npm uninstall -g <pkg>
+ * - 通过官方脚本安装的工具（antigravity/atomcode/qoder/qoder_cn/grok）：没有统一卸载命令，提示手动卸载
+ * @param {string} toolId - 工具 ID
+ * @returns {Promise<object>} { success, code?, message? }
+ */
+async function doUninstall(toolId) {
+  const tools = getAllTools();
+  const tool = tools.find(t => t.id === toolId);
+  if (!tool) throw new Error('未知工具');
+
+  if (SCRIPT_INSTALLED_TOOL_IDS.includes(tool.id)) {
+    const msg = `${tool.name} 通过官方安装脚本安装，没有提供统一的自动卸载命令，请参考官方文档手动卸载`;
+    sendLog('error', tool.id, msg);
+    return { success: false, message: msg };
+  }
+
+  if (!tool.pkg) {
+    const msg = `${tool.name} 缺少卸载命令（未配置 npm 包名）`;
+    sendLog('error', tool.id, msg);
+    return { success: false, message: msg };
+  }
+
+  sendLog('start', tool.id, `开始卸载 ${tool.name} ...`);
+
+  const isWin = os.platform() === 'win32';
+  const uninstallCmd = `npm uninstall -g ${tool.pkg} --registry=${currentRegistry}`;
+  const shellCmd = isWin ? 'cmd.exe' : 'sh';
+  const shellArgs = isWin ? ['/c', uninstallCmd] : ['-c', uninstallCmd];
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(shellCmd, shellArgs, {
+      env: { ...process.env, NPM_CONFIG_REGISTRY: currentRegistry }
+    });
+
+    let settled = false;
+    const UNINSTALL_TIMEOUT = 5 * 60 * 1000;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill();
+      sendLog('error', tool.id, `卸载超时（${UNINSTALL_TIMEOUT / 1000}s），已终止子进程`);
+      resolve({ success: false, message: '卸载超时' });
+    }, UNINSTALL_TIMEOUT);
+
+    child.stdout.on('data', (data) => sendLog('data', tool.id, data.toString()));
+    child.stderr.on('data', (data) => sendLog('data', tool.id, data.toString()));
+
+    child.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      sendLog('error', tool.id, `卸载失败: ${err.message}`);
+      reject(err);
+    });
+
+    child.on('close', (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (code === 0) {
+        sendLog('success', tool.id, `${tool.name} 已卸载`);
+        resolve({ success: true });
+      } else {
+        const msg = `卸载退出码: ${code}（Windows 上可能需要以管理员身份运行）`;
+        sendLog('error', tool.id, msg);
+        resolve({ success: false, code, message: msg });
+      }
+    });
+  });
+}
+
 // ===== IPC 处理程序（主进程 ↔ 渲染进程通信） =====
 
 // 获取工具配置（内置 + 自定义，带当前镜像源生成的 updateCmd）
@@ -752,6 +968,11 @@ ipcMain.handle('update-tool', async (event, toolId) => {
 // 安装单个工具（逻辑与更新相同，npm install -g 同时适用于首次安装和升级）
 ipcMain.handle('install-tool', async (event, toolId) => {
   return doInstallOrUpdate(toolId);
+});
+
+// 卸载单个工具
+ipcMain.handle('uninstall-tool', async (event, toolId) => {
+  return doUninstall(toolId);
 });
 
 // 批量安装未安装的工具（串行执行，避免并发 npm 全局安装冲突）
