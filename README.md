@@ -4,10 +4,12 @@
 
 ## 功能特性
 
-- 自动检测 AI 编程工具最新版本
-- 一键下载并更新安装
-- 支持多种 AI 编程助手（KiMi、Claude、Codex、OpenCode、CodeBuddy、Qwen Code、Antigravity CLI 等）
-- 简洁直观的桌面端 UI
+- 自动检测 AI 编程工具本地/远端版本（semver 比较，仅提示真正有更新的工具）
+- 一键安装、更新、卸载（npm 全局包）
+- 支持多种 AI 编程助手：Kimi、Claude、Codex、OpenCode、CodeBuddy、Qwen、Antigravity、AtomCode、Qoder、Grok 等
+- 自定义 npm 工具与自定义镜像源
+- 系统托盘、后台定时检测通知、设置页（检测间隔 / 最小化到托盘）
+- 实时日志：复制 / 导出
 
 ## 安装
 

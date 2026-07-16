@@ -295,7 +295,8 @@ function createTray() {
 function startBackgroundCheck() {
   stopBackgroundCheck(); // 先清除已有定时器，避免重复
   const settings = loadSettings();
-  const hours = settings.backgroundCheckHours || 4;
+  // 注意：0 表示禁用，不能用 || 否则 0 会被当成 falsy 回退到 4
+  const hours = settings.backgroundCheckHours ?? 4;
   if (hours <= 0) return; // 用户禁用了后台检测
 
   const intervalMs = hours * 60 * 60 * 1000;
@@ -452,12 +453,122 @@ function execCommand(command, args = [], options = {}) {
  * 部分 CLI 会在版本号前后附带工具名等文字，如 "2.1.201 (Claude Code)" 或 "codex-cli 0.142.5"
  * 需要先提纯再比较，否则永远判定为不相等
  * @param {string} text - 原始版本输出文本
- * @returns {string|null} 提取到的版本号（如 "1.2.3"），未匹配则返回原文
+ * @returns {string|null} 提取到的版本号（如 "1.2.3"），未匹配则返回 null
  */
 function extractVersionNumber(text) {
   if (!text) return null;
-  const match = text.match(/\d+\.\d+\.\d+(?:[-.][0-9A-Za-z.-]+)?/);
-  return match ? match[0] : text.trim();
+  const match = String(text).match(/v?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]*)?)/i);
+  return match ? match[1] : null;
+}
+
+/**
+ * 解析 semver 的 major.minor.patch（忽略预发布与构建元数据做数值比较）
+ * @param {string} version
+ * @returns {{ major: number, minor: number, patch: number }|null}
+ */
+function parseSemver(version) {
+  if (!version) return null;
+  const cleaned = String(version).trim().replace(/^v/i, '');
+  const match = cleaned.match(/^(\d+)\.(\d+)\.(\d+)/);
+  if (!match) return null;
+  return {
+    major: parseInt(match[1], 10),
+    minor: parseInt(match[2], 10),
+    patch: parseInt(match[3], 10)
+  };
+}
+
+/**
+ * 比较两个版本号
+ * @returns {number|null} -1: a<b, 0: a==b, 1: a>b, null: 无法比较
+ */
+function compareSemver(a, b) {
+  const pa = parseSemver(extractVersionNumber(a) || a);
+  const pb = parseSemver(extractVersionNumber(b) || b);
+  if (!pa || !pb) return null;
+  if (pa.major !== pb.major) return pa.major < pb.major ? -1 : 1;
+  if (pa.minor !== pb.minor) return pa.minor < pb.minor ? -1 : 1;
+  if (pa.patch !== pb.patch) return pa.patch < pb.patch ? -1 : 1;
+  return 0;
+}
+
+/**
+ * 远端版本是否比本地更新（仅当明确更新时返回 true）
+ */
+function isRemoteNewer(localVersion, remoteVersion) {
+  const cmp = compareSemver(localVersion, remoteVersion);
+  return cmp === -1;
+}
+
+/**
+ * 校验 npm 镜像源 URL（仅允许 http/https）
+ */
+function isValidRegistryUrl(url) {
+  if (!url || typeof url !== 'string') return false;
+  try {
+    const parsed = new URL(url.trim());
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 校验 npm 包名（防止命令注入）
+ */
+function isValidNpmPackage(pkg) {
+  if (!pkg || typeof pkg !== 'string') return false;
+  if (/[\s;&|`$<>(){}[\]\\'"!]/.test(pkg)) return false;
+  // 支持 @scope/name 或 name
+  return /^(@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/i.test(pkg);
+}
+
+/**
+ * 校验 CLI 命令名
+ */
+function isValidCliCommand(cmd) {
+  if (!cmd || typeof cmd !== 'string') return false;
+  return /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(cmd);
+}
+
+/**
+ * 从系统重新读取 PATH 并写入当前进程（安装后可立即检测到新命令）
+ */
+function refreshProcessPath() {
+  try {
+    if (os.platform() === 'win32') {
+      const { execSync } = require('child_process');
+      const ps = 'powershell.exe';
+      const userPath = execSync(
+        `${ps} -NoProfile -Command "[Environment]::GetEnvironmentVariable('Path','User')"`,
+        { encoding: 'utf-8', timeout: 8000, windowsHide: true }
+      ).trim();
+      const machinePath = execSync(
+        `${ps} -NoProfile -Command "[Environment]::GetEnvironmentVariable('Path','Machine')"`,
+        { encoding: 'utf-8', timeout: 8000, windowsHide: true }
+      ).trim();
+      const parts = [machinePath, userPath].filter(Boolean);
+      if (parts.length) {
+        process.env.Path = parts.join(';');
+        process.env.PATH = process.env.Path;
+      }
+    } else {
+      // Unix: 合并常见用户路径
+      const home = os.homedir();
+      const extras = [
+        path.join(home, '.local', 'bin'),
+        path.join(home, '.npm-global', 'bin'),
+        '/usr/local/bin'
+      ];
+      const current = process.env.PATH || '';
+      const merged = [...extras.filter(p => fs.existsSync(p) && !current.includes(p)), current]
+        .filter(Boolean)
+        .join(path.delimiter);
+      process.env.PATH = merged;
+    }
+  } catch {
+    // PATH 刷新失败不阻断主流程
+  }
 }
 
 /**
@@ -585,14 +696,8 @@ async function checkLatestVersion(tool) {
       const manifest = await res.json();
       return { latest: manifest.version };
     } catch (err) {
-      // 平台特定 manifest 失败时，回退到 windows_amd64 兜底
-      try {
-        const res = await fetch('https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/windows_amd64.json');
-        const manifest = await res.json();
-        return { latest: manifest.version };
-      } catch (innerErr) {
-        return { latest: null, error: innerErr.message };
-      }
+      // 不再回退到 windows_amd64：其它平台会拿到错误版本号
+      return { latest: null, error: err.message };
     }
   }
 
@@ -672,6 +777,15 @@ async function checkTool(tool) {
     checkLocalVersion(tool),
     checkLatestVersion(tool)
   ]);
+  const localNorm = local.normalizedVersion || extractVersionNumber(local.version);
+  const remoteNorm = extractVersionNumber(remote.latest) || remote.latest;
+  // 仅当远端版本明确比本地新时标记可更新（本地已是更新版本则不提示降级）
+  const needsUpdate = !!(
+    local.installed &&
+    localNorm &&
+    remoteNorm &&
+    isRemoteNewer(localNorm, remoteNorm)
+  );
   const result = {
     ...tool,
     installed: local.installed,
@@ -679,8 +793,9 @@ async function checkTool(tool) {
     latestVersion: remote.latest,
     notFound: local.notFound,
     error: local.error || remote.error,
-    // 需要更新的条件：已安装 + 本地版本号提取成功 + 远端版本号获取成功 + 两者不一致
-    needsUpdate: !!(local.installed && local.normalizedVersion && remote.latest && local.normalizedVersion !== extractVersionNumber(remote.latest))
+    needsUpdate,
+    // 本地比远端新时给出提示状态，便于 UI 展示
+    isAhead: !!(local.installed && localNorm && remoteNorm && compareSemver(localNorm, remoteNorm) === 1)
   };
   const remoteDesc = remote.latest
     ? remote.latest
@@ -865,25 +980,32 @@ async function doInstallOrUpdate(toolId) {
 
 // ===== 卸载执行 =====
 
-// 通过官方安装脚本安装的工具，没有统一的自动卸载命令，需用户手动卸载
-const SCRIPT_INSTALLED_TOOL_IDS = ['antigravity', 'atomcode', 'qoder', 'qoder_cn', 'grok'];
+// 通过官方安装脚本安装的工具：无统一卸载命令，提供文档链接引导
+const SCRIPT_INSTALLED_TOOLS = {
+  antigravity: { docsUrl: 'https://antigravity.google/' },
+  atomcode: { docsUrl: 'https://atomgit.com/' },
+  qoder: { docsUrl: 'https://qoder.com/' },
+  qoder_cn: { docsUrl: 'https://qoder.com.cn/' },
+  grok: { docsUrl: 'https://x.ai/' }
+};
 
 /**
  * 执行单个工具的卸载
  * - npm 安装的工具：npm uninstall -g <pkg>
  * - 通过官方脚本安装的工具（antigravity/atomcode/qoder/qoder_cn/grok）：没有统一卸载命令，提示手动卸载
  * @param {string} toolId - 工具 ID
- * @returns {Promise<object>} { success, code?, message? }
+ * @returns {Promise<object>} { success, code?, message?, docsUrl? }
  */
 async function doUninstall(toolId) {
   const tools = getAllTools();
   const tool = tools.find(t => t.id === toolId);
   if (!tool) throw new Error('未知工具');
 
-  if (SCRIPT_INSTALLED_TOOL_IDS.includes(tool.id)) {
-    const msg = `${tool.name} 通过官方安装脚本安装，没有提供统一的自动卸载命令，请参考官方文档手动卸载`;
+  if (SCRIPT_INSTALLED_TOOLS[tool.id]) {
+    const docsUrl = SCRIPT_INSTALLED_TOOLS[tool.id].docsUrl;
+    const msg = `${tool.name} 通过官方安装脚本安装，没有统一的自动卸载命令。请参考官方文档手动卸载：${docsUrl}`;
     sendLog('error', tool.id, msg);
-    return { success: false, message: msg };
+    return { success: false, message: msg, docsUrl, manualUninstall: true };
   }
 
   if (!tool.pkg) {
@@ -948,12 +1070,14 @@ ipcMain.handle('get-tools', () => getAllTools());
 
 // 批量检测所有工具版本（并行执行）
 ipcMain.handle('check-versions', async () => {
+  refreshProcessPath();
   const tools = getAllTools();
   return Promise.all(tools.map(checkTool));
 });
 
 // 检测单个工具版本
 ipcMain.handle('check-version', async (event, toolId) => {
+  refreshProcessPath();
   const tools = getAllTools();
   const tool = tools.find(t => t.id === toolId);
   if (!tool) throw new Error('未知工具');
@@ -962,17 +1086,23 @@ ipcMain.handle('check-version', async (event, toolId) => {
 
 // 更新单个工具
 ipcMain.handle('update-tool', async (event, toolId) => {
-  return doInstallOrUpdate(toolId);
+  const result = await doInstallOrUpdate(toolId);
+  refreshProcessPath();
+  return result;
 });
 
 // 安装单个工具（逻辑与更新相同，npm install -g 同时适用于首次安装和升级）
 ipcMain.handle('install-tool', async (event, toolId) => {
-  return doInstallOrUpdate(toolId);
+  const result = await doInstallOrUpdate(toolId);
+  refreshProcessPath();
+  return result;
 });
 
 // 卸载单个工具
 ipcMain.handle('uninstall-tool', async (event, toolId) => {
-  return doUninstall(toolId);
+  const result = await doUninstall(toolId);
+  refreshProcessPath();
+  return result;
 });
 
 // 批量安装未安装的工具（串行执行，避免并发 npm 全局安装冲突）
@@ -986,6 +1116,7 @@ ipcMain.handle('install-all', async (event, toolIds) => {
       results.push({ toolId, success: false, message: err.message });
     }
   }
+  refreshProcessPath();
   return results;
 });
 
@@ -1000,6 +1131,7 @@ ipcMain.handle('update-all', async (event, toolIds) => {
       results.push({ toolId, success: false, message: err.message });
     }
   }
+  refreshProcessPath();
   return results;
 });
 
@@ -1013,10 +1145,16 @@ ipcMain.handle('get-current-registry', () => currentRegistry);
 
 // 切换镜像源并持久化保存
 ipcMain.handle('set-registry', (event, url) => {
-  currentRegistry = url;
-  saveSettings({ registry: url });
-  sendLog('info', 'system', `镜像源已切换为: ${url}`);
-  return { success: true };
+  if (!isValidRegistryUrl(url)) {
+    const message = '无效的镜像源 URL，请使用 http:// 或 https:// 开头的地址';
+    sendLog('error', 'system', message);
+    return { success: false, message };
+  }
+  const normalized = url.trim().endsWith('/') ? url.trim() : `${url.trim()}/`;
+  currentRegistry = normalized;
+  saveSettings({ registry: normalized });
+  sendLog('info', 'system', `镜像源已切换为: ${normalized}`);
+  return { success: true, registry: normalized };
 });
 
 // ===== 自定义工具 IPC =====
@@ -1026,15 +1164,31 @@ ipcMain.handle('set-registry', (event, url) => {
  * @param {object} toolConfig - { name, cmd, pkg, versionArg? }
  */
 ipcMain.handle('add-custom-tool', (event, toolConfig) => {
+  const name = (toolConfig.name || '').trim();
+  const cmd = (toolConfig.cmd || '').trim();
+  const pkg = (toolConfig.pkg || '').trim();
+  const versionArg = (toolConfig.versionArg || '--version').trim() || '--version';
+
+  if (!name) {
+    return { success: false, message: '工具名称不能为空' };
+  }
+  if (!isValidNpmPackage(pkg)) {
+    return { success: false, message: 'npm 包名不合法（仅允许字母、数字、@scope/、.-_~，禁止空格与 shell 特殊字符）' };
+  }
+  if (!isValidCliCommand(cmd)) {
+    return { success: false, message: 'CLI 命令名不合法（仅允许字母、数字、. _ -）' };
+  }
+  if (!/^[a-zA-Z0-9._-]+$/.test(versionArg.replace(/^-+/, ''))) {
+    return { success: false, message: '版本参数不合法' };
+  }
+
   const custom = loadCustomTools();
+  if (custom.some(t => t.cmd === cmd || t.pkg === pkg)) {
+    return { success: false, message: '已存在相同命令名或包名的自定义工具' };
+  }
+
   const id = 'custom_' + Date.now();
-  const newTool = {
-    id,
-    name: toolConfig.name,
-    cmd: toolConfig.cmd,
-    pkg: toolConfig.pkg,
-    versionArg: toolConfig.versionArg || '--version'
-  };
+  const newTool = { id, name, cmd, pkg, versionArg };
   custom.push(newTool);
   saveCustomTools(custom);
   sendLog('info', 'system', `已添加自定义工具: ${newTool.name}`);
@@ -1078,9 +1232,19 @@ ipcMain.handle('check-environment', async () => {
     result.errors.push('未检测到 npm，请检查 Node.js 安装是否完整');
   }
 
-  // 获取 Windows 版本号
+  // 操作系统信息（按平台正确显示，不再写死 Windows）
   try {
-    result.os = `Windows ${os.release()}`;
+    const platform = os.platform();
+    const release = os.release();
+    if (platform === 'win32') {
+      result.os = `Windows ${release}`;
+    } else if (platform === 'darwin') {
+      result.os = `macOS ${release}`;
+    } else if (platform === 'linux') {
+      result.os = `Linux ${release}`;
+    } else {
+      result.os = `${platform} ${release}`;
+    }
   } catch {
     result.os = os.platform();
   }
@@ -1126,7 +1290,7 @@ ipcMain.handle('show-admin-tip', async () => {
   await dialog.showMessageBox(mainWindow, {
     type: 'info',
     title: '需要管理员权限',
-    message: '在 Windows 上全局安装 npm 包可能需要管理员权限。\n\n如果更新失败，请右键点击 updateTool.exe 选择「以管理员身份运行」。',
+    message: '在 Windows 上全局安装 npm 包可能需要管理员权限。\n\n如果安装/更新失败，请右键点击「AI Code Tool Updater.exe」选择「以管理员身份运行」，或将 npm 全局目录配置到用户目录后重试。',
     buttons: ['知道了']
   });
 });

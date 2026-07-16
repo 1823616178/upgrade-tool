@@ -2,6 +2,8 @@
 let toolsData = [];
 let isChecking = false;
 let isUpdating = false;
+/** 切换到「自定义源」前，记住当前选中的镜像源，取消时可恢复 */
+let previousRegistryUrl = '';
 
 // ===== DOM 元素 =====
 const toolsGrid = document.getElementById('tools-grid');
@@ -14,6 +16,7 @@ const btnClearLog = document.getElementById('btn-clear-log');
 const btnCopyLog = document.getElementById('btn-copy-log');
 const btnExportLog = document.getElementById('btn-export-log');
 const btnAddTool = document.getElementById('btn-add-tool');
+const btnSettings = document.getElementById('btn-settings');
 const btnInstallAgyyolo = document.getElementById('btn-install-agyyolo');
 const btnOpenPowerShell = document.getElementById('btn-open-powershell');
 const selectRegistry = document.getElementById('select-registry');
@@ -24,7 +27,7 @@ const envNode = document.getElementById('env-node');
 const envNpm = document.getElementById('env-npm');
 const envOs = document.getElementById('env-os');
 
-// 模态框元素
+// 自定义工具模态框
 const modalOverlay = document.getElementById('modal-overlay');
 const btnModalClose = document.getElementById('btn-modal-close');
 const btnModalCancel = document.getElementById('btn-modal-cancel');
@@ -33,6 +36,21 @@ const inputToolName = document.getElementById('input-tool-name');
 const inputToolPkg = document.getElementById('input-tool-pkg');
 const inputToolCmd = document.getElementById('input-tool-cmd');
 const inputToolVersionArg = document.getElementById('input-tool-version-arg');
+
+// 设置模态框
+const settingsOverlay = document.getElementById('settings-overlay');
+const btnSettingsClose = document.getElementById('btn-settings-close');
+const btnSettingsCancel = document.getElementById('btn-settings-cancel');
+const btnSettingsSave = document.getElementById('btn-settings-save');
+const selectBgCheck = document.getElementById('select-bg-check');
+const checkMinimizeTray = document.getElementById('check-minimize-tray');
+
+// 自定义镜像源模态框
+const registryOverlay = document.getElementById('registry-overlay');
+const btnRegistryClose = document.getElementById('btn-registry-close');
+const btnRegistryCancel = document.getElementById('btn-registry-cancel');
+const btnRegistrySave = document.getElementById('btn-registry-save');
+const inputRegistryUrl = document.getElementById('input-registry-url');
 
 // ===== 初始化 =====
 async function init() {
@@ -62,21 +80,34 @@ function bindEvents() {
   btnCopyLog.addEventListener('click', copyLog);
   btnExportLog.addEventListener('click', exportLog);
   btnAddTool.addEventListener('click', openModal);
+  btnSettings.addEventListener('click', openSettings);
   btnDismissEnv.addEventListener('click', () => { envBanner.style.display = 'none'; });
 
-  // 镜像源切换
-  selectRegistry.addEventListener('change', async () => {
-    const url = selectRegistry.value;
-    await window.electronAPI.setRegistry(url);
-    appendLog('info', 'system', `镜像源已切换，下次检测/更新将使用新源`);
-  });
+  // 镜像源切换（含自定义源弹窗）
+  selectRegistry.addEventListener('change', onRegistryChange);
 
-  // 模态框事件
+  // 自定义工具模态框
   btnModalClose.addEventListener('click', closeModal);
   btnModalCancel.addEventListener('click', closeModal);
   btnModalSave.addEventListener('click', saveCustomTool);
   modalOverlay.addEventListener('click', (e) => {
     if (e.target === modalOverlay) closeModal();
+  });
+
+  // 设置模态框
+  btnSettingsClose.addEventListener('click', closeSettings);
+  btnSettingsCancel.addEventListener('click', closeSettings);
+  btnSettingsSave.addEventListener('click', saveSettingsFromUI);
+  settingsOverlay.addEventListener('click', (e) => {
+    if (e.target === settingsOverlay) closeSettings();
+  });
+
+  // 自定义镜像源模态框
+  btnRegistryClose.addEventListener('click', cancelCustomRegistry);
+  btnRegistryCancel.addEventListener('click', cancelCustomRegistry);
+  btnRegistrySave.addEventListener('click', saveCustomRegistry);
+  registryOverlay.addEventListener('click', (e) => {
+    if (e.target === registryOverlay) cancelCustomRegistry();
   });
 }
 
@@ -101,10 +132,26 @@ async function checkEnvironment() {
     if (envNpm) envNpm.textContent = `npm: ${env.npm || '未安装'}`;
     if (envOs) envOs.textContent = env.os || 'OS: 未知';
 
-    // 如果有错误，显示警告横幅
+    // 如果有错误，显示警告横幅 + Node 下载链接
     if (env.errors && env.errors.length > 0) {
       envBanner.style.display = 'flex';
       envBannerText.textContent = env.errors.join(' | ');
+
+      // 移除旧链接，避免重复添加
+      const oldLink = envBanner.querySelector('.env-banner-link');
+      if (oldLink) oldLink.remove();
+
+      if (env.errors.some(e => /Node\.js|npm/i.test(e))) {
+        const link = document.createElement('button');
+        link.type = 'button';
+        link.className = 'env-banner-link';
+        link.textContent = '打开 Node.js 官网';
+        link.addEventListener('click', () => {
+          window.electronAPI.openExternal('https://nodejs.org/');
+        });
+        envBannerText.insertAdjacentElement('afterend', link);
+      }
+
       appendLog('error', 'system', `环境异常: ${env.errors.join('; ')}`);
     }
   } catch (err) {
@@ -117,6 +164,7 @@ async function loadRegistries() {
   try {
     const registries = await window.electronAPI.getRegistries();
     const current = await window.electronAPI.getCurrentRegistry();
+    previousRegistryUrl = current;
 
     selectRegistry.innerHTML = '';
     for (const reg of registries) {
@@ -127,21 +175,118 @@ async function loadRegistries() {
       selectRegistry.appendChild(option);
     }
 
-    // 添加"自定义"选项（支持用户输入自定义源地址）
-    const customOption = document.createElement('option');
-    customOption.value = '__custom__';
-    customOption.textContent = '自定义源...';
-    selectRegistry.appendChild(customOption);
+    // 添加「自定义源…」入口（始终 value 为 __custom__）
+    const customEntry = document.createElement('option');
+    customEntry.value = '__custom__';
+    customEntry.textContent = '自定义源...';
+    selectRegistry.appendChild(customEntry);
 
-    // 如果当前源不在预设列表中，选中自定义并显示
+    // 当前源不在预设中：额外展示一条当前自定义源
     const isPreset = registries.some(r => r.url === current);
-    if (!isPreset) {
-      customOption.value = current;
-      customOption.textContent = `自定义: ${current}`;
-      customOption.selected = true;
+    if (!isPreset && current) {
+      const customActive = document.createElement('option');
+      customActive.value = current;
+      customActive.textContent = `自定义: ${current}`;
+      customActive.selected = true;
+      selectRegistry.insertBefore(customActive, customEntry);
+      previousRegistryUrl = current;
     }
   } catch (err) {
     appendLog('error', 'system', `加载镜像源失败: ${err.message}`);
+  }
+}
+
+async function onRegistryChange() {
+  const url = selectRegistry.value;
+  if (url === '__custom__') {
+    openCustomRegistryModal();
+    return;
+  }
+  try {
+    const result = await window.electronAPI.setRegistry(url);
+    if (!result.success) {
+      appendLog('error', 'system', result.message || '镜像源切换失败');
+      await loadRegistries();
+      return;
+    }
+    previousRegistryUrl = result.registry || url;
+    appendLog('info', 'system', `镜像源已切换为: ${previousRegistryUrl}`);
+  } catch (err) {
+    appendLog('error', 'system', `镜像源切换失败: ${err.message}`);
+    await loadRegistries();
+  }
+}
+
+function openCustomRegistryModal() {
+  inputRegistryUrl.value = previousRegistryUrl && !isPresetRegistry(previousRegistryUrl)
+    ? previousRegistryUrl
+    : '';
+  registryOverlay.style.display = 'flex';
+  inputRegistryUrl.focus();
+}
+
+function isPresetRegistry(url) {
+  const options = Array.from(selectRegistry.options);
+  return options.some(o => o.value === url && o.value !== '__custom__' && !o.textContent.startsWith('自定义:'));
+}
+
+function cancelCustomRegistry() {
+  registryOverlay.style.display = 'none';
+  // 恢复到切换前的源
+  loadRegistries();
+}
+
+async function saveCustomRegistry() {
+  const url = inputRegistryUrl.value.trim();
+  if (!url) {
+    appendLog('error', 'system', '请输入镜像源 URL');
+    return;
+  }
+  if (!/^https?:\/\//i.test(url)) {
+    appendLog('error', 'system', '镜像源 URL 必须以 http:// 或 https:// 开头');
+    return;
+  }
+  try {
+    const result = await window.electronAPI.setRegistry(url);
+    if (!result.success) {
+      appendLog('error', 'system', result.message || '镜像源切换失败');
+      return;
+    }
+    registryOverlay.style.display = 'none';
+    previousRegistryUrl = result.registry || url;
+    await loadRegistries();
+    appendLog('success', 'system', `已使用自定义镜像源: ${previousRegistryUrl}`);
+  } catch (err) {
+    appendLog('error', 'system', `镜像源切换失败: ${err.message}`);
+  }
+}
+
+// ===== 设置页 =====
+async function openSettings() {
+  try {
+    const settings = await window.electronAPI.getSettings();
+    const hours = settings.backgroundCheckHours ?? 4;
+    selectBgCheck.value = String(hours);
+    checkMinimizeTray.checked = settings.minimizeToTray !== false;
+    settingsOverlay.style.display = 'flex';
+  } catch (err) {
+    appendLog('error', 'system', `加载设置失败: ${err.message}`);
+  }
+}
+
+function closeSettings() {
+  settingsOverlay.style.display = 'none';
+}
+
+async function saveSettingsFromUI() {
+  try {
+    const backgroundCheckHours = parseInt(selectBgCheck.value, 10);
+    const minimizeToTray = checkMinimizeTray.checked;
+    await window.electronAPI.saveSettings({ backgroundCheckHours, minimizeToTray });
+    closeSettings();
+    appendLog('success', 'system', `设置已保存：后台检测 ${backgroundCheckHours === 0 ? '已关闭' : `每 ${backgroundCheckHours} 小时`}，托盘最小化 ${minimizeToTray ? '开' : '关'}`);
+  } catch (err) {
+    appendLog('error', 'system', `保存设置失败: ${err.message}`);
   }
 }
 
@@ -171,7 +316,11 @@ async function saveCustomTool() {
   }
 
   try {
-    await window.electronAPI.addCustomTool({ name, pkg, cmd, versionArg });
+    const result = await window.electronAPI.addCustomTool({ name, pkg, cmd, versionArg });
+    if (!result || result.success === false) {
+      appendLog('error', 'system', (result && result.message) || '添加自定义工具失败');
+      return;
+    }
     closeModal();
     appendLog('success', 'system', `自定义工具 "${name}" 已添加，正在刷新...`);
     await checkVersions();
@@ -242,6 +391,10 @@ function renderTools() {
       statusText = '可更新';
       canUpdate = true;
       updateCount++;
+    } else if (tool.installed && tool.isAhead) {
+      // 本地版本比远端新：不算“可更新”，避免误导用户降级
+      statusClass = 'status-latest';
+      statusText = '本地较新';
     } else if (tool.installed && tool.latestVersion) {
       statusClass = 'status-latest';
       statusText = '最新';
@@ -345,7 +498,7 @@ async function checkVersions() {
   isChecking = true;
   btnCheck.disabled = true;
   btnCheck.innerHTML = '<span class="icon">⏳</span> 检测中...';
-  clearLog();
+  // 不再自动清空日志，方便对照历史输出；需要清空请点「清空」
   appendLog('info', 'system', '开始检测所有工具版本...');
 
   try {
@@ -457,6 +610,10 @@ async function uninstallTool(toolId) {
     const result = await window.electronAPI.uninstallTool(toolId);
     if (!result.success) {
       appendLog('error', toolId, result.message || '卸载失败');
+      // 脚本安装类工具：引导打开官方文档
+      if (result.docsUrl && confirm(`${name} 需手动卸载。\n是否打开官方文档？\n\n${result.docsUrl}`)) {
+        await window.electronAPI.openExternal(result.docsUrl);
+      }
     }
   } catch (err) {
     appendLog('error', toolId, `卸载异常: ${err.message}`);
@@ -470,6 +627,7 @@ async function uninstallTool(toolId) {
 // ===== 移除自定义工具 =====
 async function removeCustomTool(toolId) {
   const name = getToolName(toolId);
+  if (!confirm(`确定要从列表中移除自定义工具「${name}」吗？\n（不会卸载已安装的 npm 包）`)) return;
   try {
     await window.electronAPI.removeCustomTool(toolId);
     appendLog('info', 'system', `自定义工具 "${name}" 已移除`);

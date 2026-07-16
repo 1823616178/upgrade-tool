@@ -71,6 +71,9 @@
                     <button id="btn-add-tool" class="btn btn-tool" title="添加自定义工具">
                         <span class="icon">➕</span> 添加工具
                     </button>
+                    <button id="btn-settings" class="btn btn-tool" title="应用设置">
+                        <span class="icon">⚙️</span> 设置
+                    </button>
                     <button id="btn-admin" class="btn btn-tool" title="查看管理员权限说明">
                         <span class="icon">⚠️</span> 权限提示
                     </button>
@@ -104,7 +107,7 @@
                 <span id="env-npm" class="env-tag">npm: —</span>
                 <span id="env-os" class="env-tag">OS: —</span>
             </div>
-            <span class="footer-hint">版本检测基于 npm view · 关闭窗口最小化到托盘</span>
+            <span class="footer-hint">版本比较使用 semver · 关闭窗口可最小化到托盘</span>
         </footer>
     </div>
 
@@ -137,6 +140,63 @@
             <div class="modal-footer">
                 <button id="btn-modal-cancel" class="btn btn-ghost">取消</button>
                 <button id="btn-modal-save" class="btn btn-primary">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 应用设置模态框 -->
+    <div id="settings-overlay" class="modal-overlay" style="display: none;">
+        <div class="modal">
+            <div class="modal-header">
+                <h3>应用设置</h3>
+                <button id="btn-settings-close" class="btn-modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>后台版本检测间隔</label>
+                    <select id="select-bg-check" class="form-input form-select">
+                        <option value="0">关闭</option>
+                        <option value="1">每 1 小时</option>
+                        <option value="2">每 2 小时</option>
+                        <option value="4">每 4 小时</option>
+                        <option value="6">每 6 小时</option>
+                        <option value="12">每 12 小时</option>
+                        <option value="24">每 24 小时</option>
+                    </select>
+                    <p class="form-hint">有新版本时通过系统通知提醒</p>
+                </div>
+                <div class="form-group form-row">
+                    <label class="checkbox-label" for="check-minimize-tray">
+                        <input id="check-minimize-tray" type="checkbox" />
+                        <span>关闭窗口时最小化到系统托盘</span>
+                    </label>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button id="btn-settings-cancel" class="btn btn-ghost">取消</button>
+                <button id="btn-settings-save" class="btn btn-primary">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 自定义镜像源模态框 -->
+    <div id="registry-overlay" class="modal-overlay" style="display: none;">
+        <div class="modal">
+            <div class="modal-header">
+                <h3>自定义镜像源</h3>
+                <button id="btn-registry-close" class="btn-modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>镜像源 URL <span class="required">*</span></label>
+                    <input id="input-registry-url" type="text" class="form-input"
+                        placeholder="例如：https://registry.npmmirror.com/" />
+                    <p class="form-hint">仅支持 http:// 或 https:// 地址</p>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button id="btn-registry-cancel" class="btn btn-ghost">取消</button>
+                <button id="btn-registry-save" class="btn btn-primary">使用此源</button>
             </div>
         </div>
     </div>
