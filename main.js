@@ -582,10 +582,19 @@ function refreshProcessPath() {
         `${ps} -NoProfile -Command "[Environment]::GetEnvironmentVariable('Path','Machine')"`,
         { encoding: 'utf-8', timeout: 8000, windowsHide: true }
       ).trim();
-      const parts = [machinePath, userPath].filter(Boolean);
-      if (parts.length) {
-        process.env.Path = parts.join(';');
-        process.env.PATH = process.env.Path;
+      const registryParts = [machinePath, userPath]
+        .filter(Boolean)
+        .join(';')
+        .split(';')
+        .filter(Boolean);
+      if (registryParts.length) {
+        // 合并而非覆盖：注册表 PATH 在前，保留当前进程继承的额外条目（如便携运行时注入的路径）
+        const currentParts = (process.env.Path || process.env.PATH || '').split(';').filter(Boolean);
+        const seen = new Set(registryParts.map(p => p.toLowerCase()));
+        const extras = currentParts.filter(p => !seen.has(p.toLowerCase()));
+        const merged = [...registryParts, ...extras].join(';');
+        process.env.Path = merged;
+        process.env.PATH = merged;
       }
     } else {
       // Unix: 合并常见用户路径
