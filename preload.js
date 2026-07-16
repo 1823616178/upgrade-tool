@@ -21,12 +21,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 卸载单个工具
   uninstallTool: (toolId) => ipcRenderer.invoke('uninstall-tool', toolId),
 
-  // 更新多个工具
-  updateAll: (toolIds) => ipcRenderer.invoke('update-all', toolIds),
-
-  // 批量安装未安装的工具
-  installAll: (toolIds) => ipcRenderer.invoke('install-all', toolIds),
-
   // ===== 镜像源管理 =====
 
   // 获取可用镜像源列表
