@@ -5,6 +5,11 @@ let isUpdating = false;
 /** 切换到「自定义源」前，记住当前选中的镜像源，取消时可恢复 */
 let previousRegistryUrl = '';
 
+// ===== 日志数据（过滤视图的数据源；复制/导出始终作用于全部条目） =====
+const MAX_LOG_ENTRIES = 2000; // 上限，防止长时间运行内存无限增长
+const logEntries = [];
+const logFilters = { level: '', tool: '', keyword: '' };
+
 // ===== DOM 元素 =====
 const toolsGrid = document.getElementById('tools-grid');
 const logContainer = document.getElementById('log-container');
@@ -23,6 +28,9 @@ const selectRegistry = document.getElementById('select-registry');
 const envBanner = document.getElementById('env-banner');
 const envBannerText = document.getElementById('env-banner-text');
 const btnDismissEnv = document.getElementById('btn-dismiss-env');
+const logFilterLevel = document.getElementById('log-filter-level');
+const logFilterTool = document.getElementById('log-filter-tool');
+const logSearch = document.getElementById('log-search');
 const envNode = document.getElementById('env-node');
 const envNpm = document.getElementById('env-npm');
 const envOs = document.getElementById('env-os');
@@ -120,6 +128,11 @@ function bindEvents() {
   registryOverlay.addEventListener('click', (e) => {
     if (e.target === registryOverlay) cancelCustomRegistry();
   });
+
+  // 日志过滤
+  logFilterLevel.addEventListener('change', () => { logFilters.level = logFilterLevel.value; renderLogs(); });
+  logFilterTool.addEventListener('change', () => { logFilters.tool = logFilterTool.value; renderLogs(); });
+  logSearch.addEventListener('input', () => { logFilters.keyword = logSearch.value; renderLogs(); });
 }
 
 function bindLogListener() {
@@ -507,6 +520,7 @@ function renderTools() {
   if (btnInstallAll) btnInstallAll.disabled = installCount === 0 || isUpdating;
 
   updateStatsBar(stats);
+  updateLogToolFilter();
 }
 
 // ===== 统计摘要条 =====
@@ -793,43 +807,83 @@ function updateUIState(updating, activeToolId) {
 
 // ===== 日志相关 =====
 function clearLog() {
-  logContainer.innerHTML = '<div class="log-empty">点击「检测版本」开始</div>';
+  logEntries.length = 0;
+  renderLogs();
 }
 
 function appendLog(type, toolId, message, time) {
   if (!message || message.trim() === '') return;
 
-  // 首条日志到来时移除空状态提示
-  const emptyHint = logContainer.querySelector('.log-empty');
-  if (emptyHint) emptyHint.remove();
-
   const lines = message.split(/\r?\n/).filter(line => line.trim() !== '');
   for (const line of lines) {
-    const div = document.createElement('div');
-    div.className = `log-line log-${type}`;
+    logEntries.push({ type, toolId, message: line, time: time || new Date().toLocaleTimeString() });
+  }
+  // 超出上限从头部截断
+  if (logEntries.length > MAX_LOG_ENTRIES) {
+    logEntries.splice(0, logEntries.length - MAX_LOG_ENTRIES);
+  }
+  renderLogs();
+}
 
-    const t = time || new Date().toLocaleTimeString();
-    const toolName = toolId === 'system' ? 'SYSTEM' : getToolName(toolId);
+/** 按当前过滤条件渲染日志视图（过滤只影响视图，不改变数据） */
+function renderLogs() {
+  const keyword = logFilters.keyword.toLowerCase();
+  const fragment = document.createDocumentFragment();
+  let visible = 0;
 
-    div.innerHTML = `
-      <span class="log-time">[${t}]</span>
-      <span class="log-tool">${escapeHtml(toolName)}</span>
-      <span class="log-message">${escapeHtml(line)}</span>
-    `;
+  for (const entry of logEntries) {
+    if (logFilters.level && entry.type !== logFilters.level) continue;
+    if (logFilters.tool && entry.toolId !== logFilters.tool) continue;
+    if (keyword && !entry.message.toLowerCase().includes(keyword)) continue;
+    fragment.appendChild(buildLogLine(entry));
+    visible++;
+  }
 
-    logContainer.appendChild(div);
-    logContainer.scrollTop = logContainer.scrollHeight;
+  logContainer.innerHTML = '';
+  if (visible === 0) {
+    logContainer.innerHTML = `<div class="log-empty">${logEntries.length === 0 ? '点击「检测版本」开始' : '没有匹配过滤条件的日志'}</div>`;
+    return;
+  }
+  logContainer.appendChild(fragment);
+  logContainer.scrollTop = logContainer.scrollHeight;
+}
+
+/** 构建单行日志 DOM（全程转义，防注入） */
+function buildLogLine(entry) {
+  const div = document.createElement('div');
+  div.className = `log-line log-${entry.type}`;
+  const toolName = entry.toolId === 'system' ? 'SYSTEM' : getToolName(entry.toolId);
+  div.innerHTML = `
+    <span class="log-time">[${entry.time}]</span>
+    <span class="log-tool">${escapeHtml(toolName)}</span>
+    <span class="log-message">${escapeHtml(entry.message)}</span>
+  `;
+  return div;
+}
+
+/** 同步工具过滤器选项（随工具列表变化；尽量保留当前选择） */
+function updateLogToolFilter() {
+  if (!logFilterTool) return;
+  const current = logFilterTool.value;
+  logFilterTool.innerHTML = '<option value="">全部工具</option><option value="system">SYSTEM</option>';
+  for (const t of toolsData) {
+    const opt = document.createElement('option');
+    opt.value = t.id;
+    opt.textContent = t.name;
+    logFilterTool.appendChild(opt);
+  }
+  logFilterTool.value = current;
+  // 若所选工具已被移除（如自定义工具删除），回退到"全部工具"
+  if (logFilterTool.value !== current) {
+    logFilters.tool = '';
   }
 }
 
-// 获取日志纯文本
+// 获取日志纯文本（始终导出全部条目，不受过滤器影响）
 function getLogText() {
-  const lines = logContainer.querySelectorAll('.log-line');
-  return Array.from(lines).map(line => {
-    const time = line.querySelector('.log-time')?.textContent || '';
-    const tool = line.querySelector('.log-tool')?.textContent || '';
-    const msg = line.querySelector('.log-message')?.textContent || '';
-    return `${time} ${tool} ${msg}`;
+  return logEntries.map(e => {
+    const toolName = e.toolId === 'system' ? 'SYSTEM' : getToolName(e.toolId);
+    return `[${e.time}] ${toolName} ${e.message}`;
   }).join('\n');
 }
 

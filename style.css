@@ -977,3 +977,56 @@ html, body {
 }
 
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* ========================================
+   日志过滤器
+   ======================================== */
+.log-header { gap: 12px; }
+
+.log-filters {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  justify-content: center;
+}
+
+.log-filter-select {
+  appearance: none;
+  -webkit-appearance: none;
+  background: rgba(8, 14, 26, 0.5);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 4px 20px 4px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  cursor: pointer;
+  outline: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 10 10'%3E%3Cpath fill='%2364748b' d='M5 7L0.5 2.5h9z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 6px center;
+}
+
+.log-filter-select:hover,
+.log-filter-select:focus { border-color: var(--primary); color: var(--text); }
+
+.log-search-input {
+  background: rgba(2, 5, 14, 0.5);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 4px 10px;
+  font-size: 11px;
+  font-family: inherit;
+  color: var(--text);
+  outline: none;
+  width: 140px;
+  transition: var(--transition);
+}
+
+.log-search-input::placeholder { color: var(--text-muted); }
+
+.log-search-input:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.15);
+}

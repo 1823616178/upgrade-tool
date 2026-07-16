@@ -98,6 +98,20 @@
             <section class="log-section">
                 <div class="log-header">
                     <h2>实时日志</h2>
+                    <div class="log-filters">
+                        <select id="log-filter-level" class="log-filter-select" title="按级别筛选">
+                            <option value="">全部级别</option>
+                            <option value="info">info</option>
+                            <option value="success">success</option>
+                            <option value="error">error</option>
+                            <option value="start">start</option>
+                            <option value="data">data</option>
+                        </select>
+                        <select id="log-filter-tool" class="log-filter-select" title="按工具筛选">
+                            <option value="">全部工具</option>
+                        </select>
+                        <input id="log-search" type="text" class="log-search-input" placeholder="搜索日志..." />
+                    </div>
                     <div class="log-actions">
                         <button id="btn-copy-log" class="btn btn-ghost btn-sm" title="复制日志">📋 复制</button>
                         <button id="btn-export-log" class="btn btn-ghost btn-sm" title="导出日志">💾 导出</button>
