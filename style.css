@@ -1031,20 +1031,12 @@ html, body {
   box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.15);
 }
 
-/* ===== Changelog 链接 ===== */
-.changelog-link {
-  flex-shrink: 0;
-  align-self: center;
-  background: none;
-  border: none;
-  cursor: pointer;
-  font-size: 11px;
-  padding: 2px;
-  opacity: 0.55;
-  transition: var(--transition);
+/* ===== Changelog 链接（操作按钮行的图标按钮） ===== */
+.tool-actions .changelog-link {
+  flex: none;
+  padding-left: 8px;
+  padding-right: 8px;
 }
-
-.changelog-link:hover { opacity: 1; transform: scale(1.15); }
 
 /* ========================================
    卡片状态左边条（配合 renderTools 的 card-* 类）

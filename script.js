@@ -470,7 +470,7 @@ function renderTools() {
     // changelog 入口：脚本安装工具用官网，npm 工具指向 npmjs 包页
     const changelogUrl = tool.docsUrl || (tool.pkg ? `https://www.npmjs.com/package/${tool.pkg}` : '');
     const changelogLink = changelogUrl
-      ? `<button class="changelog-link" data-url="${escapeHtml(changelogUrl)}" title="查看 ${escapeHtml(tool.name)} 更新说明" type="button">🔗</button>`
+      ? `<button class="btn btn-ghost btn-sm changelog-link" data-url="${escapeHtml(changelogUrl)}" title="查看 ${escapeHtml(tool.name)} 更新说明" type="button">🔗</button>`
       : '';
 
     card.innerHTML = `
@@ -489,11 +489,11 @@ function renderTools() {
           <span class="version-label">最新</span>
           <span class="${latestClass}" title="${escapeHtml(tool.latestVersion || '')}">${escapeHtml(tool.latestVersion || '-')}</span>
         </div>
-        ${changelogLink}
       </div>
       <div class="tool-actions">
         ${actionBtn}
         ${uninstallBtn}
+        ${changelogLink}
         ${removeBtn}
       </div>
     `;
