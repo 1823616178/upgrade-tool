@@ -407,9 +407,9 @@ function renderTools() {
     // 动作按钮：更新 / 安装 / 禁用
     let actionBtn = '';
     if (canUpdate) {
-      actionBtn = `<button class="btn btn-primary btn-update btn-sm" data-id="${tool.id}" ${isUpdating ? 'disabled' : ''}>更新</button>`;
+      actionBtn = `<button class="btn btn-primary btn-update btn-sm" data-id="${escapeHtml(tool.id)}" ${isUpdating ? 'disabled' : ''}>更新</button>`;
     } else if (canInstall) {
-      actionBtn = `<button class="btn btn-success btn-install btn-sm" data-id="${tool.id}" ${isUpdating ? 'disabled' : ''}>安装</button>`;
+      actionBtn = `<button class="btn btn-success btn-install btn-sm" data-id="${escapeHtml(tool.id)}" ${isUpdating ? 'disabled' : ''}>安装</button>`;
     } else {
       actionBtn = `<button class="btn btn-primary btn-sm" disabled>已是最新</button>`;
     }
@@ -417,13 +417,13 @@ function renderTools() {
     // 已安装的工具附加卸载按钮
     let uninstallBtn = '';
     if (tool.installed) {
-      uninstallBtn = `<button class="btn btn-danger-ghost btn-uninstall btn-sm" data-id="${tool.id}" ${isUpdating ? 'disabled' : ''}>卸载</button>`;
+      uninstallBtn = `<button class="btn btn-danger-ghost btn-uninstall btn-sm" data-id="${escapeHtml(tool.id)}" ${isUpdating ? 'disabled' : ''}>卸载</button>`;
     }
 
     // 自定义工具附加删除按钮
     let removeBtn = '';
     if (tool.isCustom) {
-      removeBtn = `<button class="btn btn-danger-ghost btn-remove btn-sm" data-id="${tool.id}" title="移除此自定义工具">🗑️</button>`;
+      removeBtn = `<button class="btn btn-danger-ghost btn-remove btn-sm" data-id="${escapeHtml(tool.id)}" title="移除此自定义工具">🗑️</button>`;
     }
 
     // 自定义工具标识
@@ -431,18 +431,18 @@ function renderTools() {
 
     card.innerHTML = `
       <div class="tool-header">
-        <h3 class="tool-name">${tool.name} ${customBadge}</h3>
+        <h3 class="tool-name">${escapeHtml(tool.name)} ${customBadge}</h3>
         <span class="tool-status ${statusClass}">${statusText}</span>
       </div>
       <div class="version-info">
         <div class="version-item">
           <span class="version-label">当前</span>
-          <span class="version-value" title="${tool.currentVersion || ''}">${tool.currentVersion || '-'}</span>
+          <span class="version-value" title="${escapeHtml(tool.currentVersion || '')}">${escapeHtml(tool.currentVersion || '-')}</span>
         </div>
         <span class="version-arrow">→</span>
         <div class="version-item">
           <span class="version-label">最新</span>
-          <span class="version-value" title="${tool.latestVersion || ''}">${tool.latestVersion || '-'}</span>
+          <span class="version-value" title="${escapeHtml(tool.latestVersion || '')}">${escapeHtml(tool.latestVersion || '-')}</span>
         </div>
       </div>
       <div class="tool-actions">
@@ -766,7 +766,7 @@ function appendLog(type, toolId, message, time) {
 
     div.innerHTML = `
       <span class="log-time">[${t}]</span>
-      <span class="log-tool">${toolName}</span>
+      <span class="log-tool">${escapeHtml(toolName)}</span>
       <span class="log-message">${escapeHtml(line)}</span>
     `;
 
@@ -825,10 +825,12 @@ function getToolName(toolId) {
 }
 
 function escapeHtml(text) {
-  return text
+  return String(text)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 // ===== 启动 =====
