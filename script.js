@@ -54,18 +54,29 @@ const inputRegistryUrl = document.getElementById('input-registry-url');
 
 // ===== 初始化 =====
 async function init() {
-  renderSkeleton();
   bindEvents();
   bindLogListener();
 
-  // 并行执行：环境检测、镜像源加载、版本检测
+  // 并行执行：环境检测、镜像源加载、骨架屏渲染（基于真实工具列表，含自定义工具）
   await Promise.all([
     checkEnvironment(),
-    loadRegistries()
+    loadRegistries(),
+    renderSkeletonFromTools()
   ]);
 
   // 启动时自动检测一次
   await checkVersions();
+}
+
+/** 从主进程获取真实工具列表并渲染骨架屏（内置 + 自定义，数量与名称始终同步） */
+async function renderSkeletonFromTools() {
+  try {
+    const tools = await window.electronAPI.getTools();
+    renderSkeleton(tools);
+  } catch (err) {
+    appendLog('error', 'system', `加载工具列表失败: ${err.message}`);
+    renderSkeleton([]);
+  }
 }
 
 // ===== 事件绑定 =====
@@ -329,16 +340,15 @@ async function saveCustomTool() {
   }
 }
 
-// ===== 渲染骨架屏 =====
-function renderSkeleton() {
+// ===== 渲染骨架屏（按真实工具列表） =====
+function renderSkeleton(tools) {
   toolsGrid.innerHTML = '';
-  const names = ['Kimi Code', 'Claude Code', 'OpenAI Codex', 'OpenCode', 'CodeBuddy', 'Qwen Code', 'Antigravity CLI', 'AtomCode', 'Qoder CLI', 'Qoder CLI (国内镜像)', 'Grok CLI'];
-  for (const name of names) {
+  for (const tool of tools) {
     const card = document.createElement('div');
     card.className = 'tool-card';
     card.innerHTML = `
       <div class="tool-header">
-        <h3 class="tool-name">${name}</h3>
+        <h3 class="tool-name">${escapeHtml(tool.name)}</h3>
         <span class="tool-status status-not-installed">等待检测</span>
       </div>
       <div class="version-info">
@@ -750,11 +760,15 @@ function updateUIState(updating, activeToolId) {
 
 // ===== 日志相关 =====
 function clearLog() {
-  logContainer.innerHTML = '';
+  logContainer.innerHTML = '<div class="log-empty">点击「检测版本」开始</div>';
 }
 
 function appendLog(type, toolId, message, time) {
   if (!message || message.trim() === '') return;
+
+  // 首条日志到来时移除空状态提示
+  const emptyHint = logContainer.querySelector('.log-empty');
+  if (emptyHint) emptyHint.remove();
 
   const lines = message.split(/\r?\n/).filter(line => line.trim() !== '');
   for (const line of lines) {
