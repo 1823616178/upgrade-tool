@@ -481,8 +481,21 @@ html, body {
   gap: 10px;
   position: relative;
   overflow: hidden;
+  /* 保证标题/版本/底部按钮都能露出；内容再多由 body 内滚动 */
+  min-height: 168px;
   transition: all 0.35s var(--ease);
   backdrop-filter: blur(12px);
+}
+
+/* 卡片中间内容区：超出时内部滚动，底部按钮始终可见 */
+.tool-card-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 /* Top highlight line */
@@ -612,8 +625,10 @@ html, body {
 
 .tool-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
-  margin-top: 2px;
+  margin-top: auto; /* 贴底，避免被内容挤出卡片可视区 */
+  flex-shrink: 0;
 }
 
 .tool-actions .btn {
@@ -622,6 +637,7 @@ html, body {
   padding: 6px 10px;
   font-size: 12px;
   border-radius: var(--radius-sm);
+  min-width: 0;
 }
 
 .tool-actions .btn-remove {

@@ -371,19 +371,21 @@ function renderSkeleton(tools) {
     const card = document.createElement('div');
     card.className = 'tool-card';
     card.innerHTML = `
-      <div class="tool-header">
-        <h3 class="tool-name">${escapeHtml(tool.name)}</h3>
-        <span class="tool-status status-not-installed">等待检测</span>
-      </div>
-      <div class="version-info">
-        <div class="version-item">
-          <span class="version-label">当前</span>
-          <span class="version-value">-</span>
+      <div class="tool-card-body">
+        <div class="tool-header">
+          <h3 class="tool-name">${escapeHtml(tool.name)}</h3>
+          <span class="tool-status status-not-installed">等待检测</span>
         </div>
-        <span class="version-arrow">→</span>
-        <div class="version-item">
-          <span class="version-label">最新</span>
-          <span class="version-value">-</span>
+        <div class="version-info">
+          <div class="version-item">
+            <span class="version-label">当前</span>
+            <span class="version-value">-</span>
+          </div>
+          <span class="version-arrow">→</span>
+          <div class="version-item">
+            <span class="version-label">最新</span>
+            <span class="version-value">-</span>
+          </div>
         </div>
       </div>
       <div class="tool-actions">
@@ -475,19 +477,21 @@ function renderTools() {
 
     card.innerHTML = `
       <div class="card-progress"></div>
-      <div class="tool-header">
-        <h3 class="tool-name">${escapeHtml(tool.name)} ${customBadge}</h3>
-        <span class="tool-status ${cls.statusClass}">${cls.statusText}</span>
-      </div>
-      <div class="version-info">
-        <div class="version-item">
-          <span class="version-label">当前</span>
-          <span class="version-value" title="${escapeHtml(tool.currentVersion || '')}">${escapeHtml(tool.currentVersion || '-')}</span>
+      <div class="tool-card-body">
+        <div class="tool-header">
+          <h3 class="tool-name">${escapeHtml(tool.name)} ${customBadge}</h3>
+          <span class="tool-status ${cls.statusClass}">${cls.statusText}</span>
         </div>
-        <span class="version-arrow">→</span>
-        <div class="version-item">
-          <span class="version-label">最新</span>
-          <span class="${latestClass}" title="${escapeHtml(tool.latestVersion || '')}">${escapeHtml(tool.latestVersion || '-')}</span>
+        <div class="version-info">
+          <div class="version-item">
+            <span class="version-label">当前</span>
+            <span class="version-value" title="${escapeHtml(tool.currentVersion || '')}">${escapeHtml(tool.currentVersion || '-')}</span>
+          </div>
+          <span class="version-arrow">→</span>
+          <div class="version-item">
+            <span class="version-label">最新</span>
+            <span class="${latestClass}" title="${escapeHtml(tool.latestVersion || '')}">${escapeHtml(tool.latestVersion || '-')}</span>
+          </div>
         </div>
       </div>
       <div class="tool-actions">
