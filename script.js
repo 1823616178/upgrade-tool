@@ -134,6 +134,14 @@ function bindEvents() {
   logFilterLevel.addEventListener('change', () => { logFilters.level = logFilterLevel.value; renderLogs(); });
   logFilterTool.addEventListener('change', () => { logFilters.tool = logFilterTool.value; renderLogs(); });
   logSearch.addEventListener('input', () => { logFilters.keyword = logSearch.value; renderLogs(); });
+
+  // Esc 关闭任意打开的模态框
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (modalOverlay.style.display === 'flex') closeModal();
+    else if (settingsOverlay.style.display === 'flex') closeSettings();
+    else if (registryOverlay.style.display === 'flex') cancelCustomRegistry();
+  });
 }
 
 function bindLogListener() {
@@ -491,6 +499,8 @@ function renderTools() {
     `;
 
     toolsGrid.appendChild(card);
+    // 入场动画逐张延迟
+    card.style.animationDelay = `${sorted.indexOf(tool) * 30}ms`;
   }
 
   // 绑定更新按钮
