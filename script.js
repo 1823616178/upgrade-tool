@@ -444,6 +444,7 @@ function renderTools() {
     const latestClass = cls.canUpdate ? 'version-value version-highlight' : 'version-value';
 
     card.innerHTML = `
+      <div class="card-progress"></div>
       <div class="tool-header">
         <h3 class="tool-name">${escapeHtml(tool.name)} ${customBadge}</h3>
         <span class="tool-status ${cls.statusClass}">${cls.statusText}</span>
@@ -681,7 +682,9 @@ async function updateAll() {
   appendLog('start', 'system', `开始一键更新 ${ids.length} 个工具...`);
 
   try {
-    for (const toolId of ids) {
+    for (let i = 0; i < ids.length; i++) {
+      const toolId = ids[i];
+      btnUpdateAll.innerHTML = `<span class="icon">⏳</span> 更新中 (${i + 1}/${ids.length})`;
       updateUIState(true, toolId);
       appendLog('start', toolId, `开始更新 ${getToolName(toolId)} ...`);
       const result = await window.electronAPI.updateTool(toolId);
@@ -695,6 +698,7 @@ async function updateAll() {
     appendLog('error', 'system', `一键更新异常: ${err.message}`);
   } finally {
     isUpdating = false;
+    btnUpdateAll.innerHTML = '<span class="icon">🚀</span> 一键更新全部';
     updateUIState(false);
     await silentRefreshAll();
   }
@@ -711,7 +715,9 @@ async function installAll() {
   appendLog('start', 'system', `开始一键安装 ${ids.length} 个工具...`);
 
   try {
-    for (const toolId of ids) {
+    for (let i = 0; i < ids.length; i++) {
+      const toolId = ids[i];
+      btnInstallAll.innerHTML = `<span class="icon">⏳</span> 安装中 (${i + 1}/${ids.length})`;
       updateUIState(true, toolId);
       appendLog('start', toolId, `开始安装 ${getToolName(toolId)} ...`);
       const result = await window.electronAPI.installTool(toolId);
@@ -725,6 +731,7 @@ async function installAll() {
     appendLog('error', 'system', `一键安装异常: ${err.message}`);
   } finally {
     isUpdating = false;
+    btnInstallAll.innerHTML = '<span class="icon">📦</span> 一键安装全部';
     updateUIState(false);
     await silentRefreshAll();
   }
@@ -770,6 +777,11 @@ function updateUIState(updating, activeToolId) {
       if (status) {
         status.className = 'tool-status status-updating';
         status.textContent = '执行中';
+      }
+      // 动作按钮替换为 spinner，提供明确的执行中反馈（结束后 refreshSingleTool 会重渲染恢复）
+      const actionBtn = card.querySelector('.btn-update, .btn-install');
+      if (actionBtn) {
+        actionBtn.innerHTML = '<span class="spinner"></span>';
       }
     } else if (!updating) {
       card.classList.remove('updating');
