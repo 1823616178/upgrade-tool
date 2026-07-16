@@ -211,6 +211,12 @@ function createWindow() {
     if (settings.minimizeToTray !== false && tray) {
       event.preventDefault();
       mainWindow.hide();
+      return;
+    }
+    // 用户未开启"最小化到托盘"：关窗即退出，先销毁托盘避免应用变僵尸进程
+    if (tray) {
+      tray.destroy();
+      tray = null;
     }
   });
 
@@ -218,6 +224,38 @@ function createWindow() {
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
+}
+
+/**
+ * 显示已有窗口或重建新窗口（窗口被销毁后，托盘动作仍可恢复界面）
+ * @returns {BrowserWindow|null}
+ */
+function showOrCreateWindow() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.show();
+    mainWindow.focus();
+    return mainWindow;
+  }
+  createWindow();
+  return mainWindow;
+}
+
+/**
+ * 向渲染进程发送"立即检测"指令
+ * 窗口刚重建时页面尚未加载完成，等 did-finish-load 再发，避免渲染进程未绑定监听而丢消息
+ */
+function sendTriggerCheck() {
+  const win = showOrCreateWindow();
+  if (!win) return;
+  if (win.webContents.isLoading()) {
+    win.webContents.once('did-finish-load', () => {
+      if (!win.isDestroyed()) {
+        win.webContents.send('trigger-check');
+      }
+    });
+  } else {
+    win.webContents.send('trigger-check');
+  }
 }
 
 // ===== 系统托盘 =====
@@ -242,23 +280,13 @@ function createTray() {
     {
       label: '显示主窗口',
       click: () => {
-        if (mainWindow) {
-          mainWindow.show();
-          mainWindow.focus();
-        }
+        showOrCreateWindow();
       }
     },
     {
       label: '立即检测更新',
       click: () => {
-        if (mainWindow) {
-          mainWindow.show();
-          mainWindow.focus();
-        }
-        // 通知渲染进程执行检测
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('trigger-check');
-        }
+        sendTriggerCheck();
       }
     },
     { type: 'separator' },
@@ -276,12 +304,9 @@ function createTray() {
   tray.setToolTip('AI Code Tool Updater');
   tray.setContextMenu(contextMenu);
 
-  // 双击托盘图标恢复窗口
+  // 双击托盘图标恢复窗口（窗口已销毁时重建）
   tray.on('double-click', () => {
-    if (mainWindow) {
-      mainWindow.show();
-      mainWindow.focus();
-    }
+    showOrCreateWindow();
   });
 }
 
@@ -313,10 +338,7 @@ function startBackgroundCheck() {
           icon: path.join(__dirname, 'build', 'icon.png')
         });
         notification.on('click', () => {
-          if (mainWindow) {
-            mainWindow.show();
-            mainWindow.focus();
-          }
+          showOrCreateWindow();
         });
         notification.show();
       }
