@@ -462,24 +462,59 @@ function extractVersionNumber(text) {
 }
 
 /**
- * 解析 semver 的 major.minor.patch（忽略预发布与构建元数据做数值比较）
+ * 解析 semver：major.minor.patch + 预发布标识（构建元数据 +xxx 按 semver 规则忽略）
  * @param {string} version
- * @returns {{ major: number, minor: number, patch: number }|null}
+ * @returns {{ major: number, minor: number, patch: number, prerelease: string|null }|null}
  */
 function parseSemver(version) {
   if (!version) return null;
   const cleaned = String(version).trim().replace(/^v/i, '');
-  const match = cleaned.match(/^(\d+)\.(\d+)\.(\d+)/);
+  const match = cleaned.match(/^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/);
   if (!match) return null;
   return {
     major: parseInt(match[1], 10),
     minor: parseInt(match[2], 10),
-    patch: parseInt(match[3], 10)
+    patch: parseInt(match[3], 10),
+    prerelease: match[4] || null
   };
 }
 
 /**
- * 比较两个版本号
+ * 按 semver 规则比较预发布标识
+ * 无预发布 > 有预发布；逐段比较：数字段数值比（数字 < 字母），字母段 ASCII 字典序；段数少者更小
+ * @param {string|null} a
+ * @param {string|null} b
+ * @returns {number} -1 / 0 / 1
+ */
+function comparePrerelease(a, b) {
+  if (!a && !b) return 0;
+  if (!a) return 1;
+  if (!b) return -1;
+  const pa = a.split('.');
+  const pb = b.split('.');
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    if (i >= pa.length) return -1;
+    if (i >= pb.length) return 1;
+    const xa = pa[i];
+    const xb = pb[i];
+    const na = /^\d+$/.test(xa) ? parseInt(xa, 10) : null;
+    const nb = /^\d+$/.test(xb) ? parseInt(xb, 10) : null;
+    if (na !== null && nb !== null) {
+      if (na !== nb) return na < nb ? -1 : 1;
+    } else if (na !== null) {
+      return -1;
+    } else if (nb !== null) {
+      return 1;
+    } else if (xa !== xb) {
+      return xa < xb ? -1 : 1;
+    }
+  }
+  return 0;
+}
+
+/**
+ * 比较两个版本号（含预发布规则）
  * @returns {number|null} -1: a<b, 0: a==b, 1: a>b, null: 无法比较
  */
 function compareSemver(a, b) {
@@ -489,7 +524,7 @@ function compareSemver(a, b) {
   if (pa.major !== pb.major) return pa.major < pb.major ? -1 : 1;
   if (pa.minor !== pb.minor) return pa.minor < pb.minor ? -1 : 1;
   if (pa.patch !== pb.patch) return pa.patch < pb.patch ? -1 : 1;
-  return 0;
+  return comparePrerelease(pa.prerelease, pb.prerelease);
 }
 
 /**

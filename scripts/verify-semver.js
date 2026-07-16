@@ -1,0 +1,41 @@
+// scripts/verify-semver.js
+// 从 main.js 中提取 semver 相关纯函数并断言比较行为（无测试框架下的轻量验证）
+// 用法：node scripts/verify-semver.js，全部 PASS 退出码 0，否则 1
+const fs = require('fs');
+const path = require('path');
+
+const src = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+
+// 提取顶层函数定义（以 "function name(" 开始、以行首 "}" 结束）
+for (const name of ['extractVersionNumber', 'parseSemver', 'comparePrerelease', 'compareSemver']) {
+  const m = src.match(new RegExp(`function ${name}\\([\\s\\S]*?\\n}`));
+  if (!m) {
+    console.error(`未找到函数: ${name}`);
+    process.exit(1);
+  }
+  eval(m[0]);
+}
+
+const cases = [
+  ['1.2.3', '1.2.4', -1],
+  ['1.2.4', '1.2.3', 1],
+  ['1.2.3', '1.2.3', 0],
+  ['v1.2.3', '1.2.3', 0],
+  ['2.0.0-rc.1', '2.0.0', -1],          // 预发布 < 正式版
+  ['2.0.0', '2.0.0-rc.1', 1],
+  ['2.0.0-rc.1', '2.0.0-rc.2', -1],     // 数字段数值比较
+  ['2.0.0-alpha', '2.0.0-alpha.1', -1], // 段数少者更小
+  ['2.0.0-alpha.1', '2.0.0-alpha.beta', -1], // 数字段 < 字母段
+  ['1.0.0+build.1', '1.0.0', 0],        // 构建元数据忽略
+  ['2.1.201 (Claude Code)', '2.1.202', -1], // 含杂质的版本输出
+];
+
+let failed = 0;
+for (const [a, b, expected] of cases) {
+  const got = compareSemver(a, b);
+  const ok = got === expected;
+  if (!ok) failed++;
+  console.log(`${ok ? 'PASS' : 'FAIL'} compareSemver(${JSON.stringify(a)}, ${JSON.stringify(b)}) = ${got} (期望 ${expected})`);
+}
+console.log(failed ? `${failed} 个用例失败` : '全部通过');
+process.exit(failed ? 1 : 0);
