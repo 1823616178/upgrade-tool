@@ -851,9 +851,32 @@ async function checkLatestVersion(tool) {
     return { latest: null, error: (lastErr && lastErr.message) || 'qoder 国际版 manifest 获取失败' };
   }
 
-  // grok：xAI 官方安装脚本模式，暂无已知的公开版本清单接口，无法自动比对最新版本
+  // grok：与官方 install.ps1 一致，读取 channel 指针（默认 stable）得到最新版本号
+  // 主源 Cloudflare 前的 x.ai，回退直连 GCS 公共制品桶
   if (tool.id === 'grok') {
-    return { latest: null, error: '暂无版本清单接口，无法自动检测最新版本，可手动点击更新重新执行安装脚本' };
+    const channel = process.env.GROK_CHANNEL || 'stable';
+    const channelUrls = [
+      `https://x.ai/cli/${channel}`,
+      `https://storage.googleapis.com/grok-build-public-artifacts/cli/${channel}`,
+    ];
+    let lastErr = null;
+    for (const url of channelUrls) {
+      try {
+        const res = await fetch(url, {
+          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+        });
+        if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+        const latest = (await res.text()).trim();
+        // 安装脚本期望 X.Y.Z 或 X.Y.Z-suffix
+        if (latest && /^\d+\.\d+\.\d+(-\S+)?$/.test(latest)) {
+          return { latest };
+        }
+        throw new Error(`无效的版本号响应: ${latest.slice(0, 40)}`);
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    return { latest: null, error: (lastErr && lastErr.message) || 'grok channel 版本获取失败' };
   }
 
   // 普通 npm 工具：查询 registry 最新版本
