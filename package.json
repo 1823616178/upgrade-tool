@@ -38,7 +38,9 @@
       "index.html",
       "style.css",
       "script.js",
-      "package.json"
+      "package.json",
+      "build/icon.ico",
+      "build/icon.png"
     ],
     "win": {
       "icon": "build/icon.ico",
