@@ -78,6 +78,16 @@ const BUILTIN_TOOLS = [
   { id: 'grok', name: 'Grok CLI', cmd: 'grok', versionArg: '--version' },
 ];
 
+// 通过官方安装脚本安装的工具：无统一卸载命令，提供文档链接引导
+// （渲染层也用它生成 changelog 官网链接）
+const SCRIPT_INSTALLED_TOOLS = {
+  antigravity: { docsUrl: 'https://antigravity.google/' },
+  atomcode: { docsUrl: 'https://atomgit.com/' },
+  qoder: { docsUrl: 'https://qoder.com/' },
+  qoder_cn: { docsUrl: 'https://qoder.com.cn/' },
+  grok: { docsUrl: 'https://x.ai/' }
+};
+
 // ===== 自定义工具持久化 =====
 // 用户自定义的工具列表保存在 userData/custom-tools.json
 
@@ -161,7 +171,9 @@ function getAllTools() {
     }
     return {
       ...t,
-      updateCmd
+      updateCmd,
+      // 脚本安装工具附带官网链接（渲染层 changelog 入口）；npm 工具由渲染层用 pkg 拼 npmjs 链接
+      docsUrl: SCRIPT_INSTALLED_TOOLS[t.id] ? SCRIPT_INSTALLED_TOOLS[t.id].docsUrl : null
     };
   });
 }
@@ -328,7 +340,8 @@ function startBackgroundCheck() {
   backgroundTimer = setInterval(async () => {
     try {
       const tools = getAllTools();
-      const results = await Promise.all(tools.map(checkTool));
+      // 后台定时检测静默执行（不刷日志窗口），仅在有更新时弹系统通知
+      const results = await Promise.all(tools.map(t => checkTool(t, { silent: true })));
       const updatable = results.filter(r => r.needsUpdate);
       if (updatable.length > 0) {
         const names = updatable.map(t => t.name).join('、');
@@ -358,11 +371,28 @@ function stopBackgroundCheck() {
 
 // ===== 应用生命周期 =====
 
+/**
+ * 应用/取消开机自启动
+ * 仅打包版生效：dev 模式下 setLoginItemSettings 会指向 electron.exe，直接跳过
+ * @param {boolean} openAtLogin
+ */
+function applyLoginItem(openAtLogin) {
+  if (!app.isPackaged) return;
+  try {
+    app.setLoginItemSettings({ openAtLogin: !!openAtLogin });
+  } catch { /* 平台不支持时静默忽略 */ }
+}
+
 // Electron 就绪后创建窗口、托盘并启动后台检测
 app.whenReady().then(() => {
   createWindow();
   createTray();
   startBackgroundCheck();
+  // 恢复用户的开机自启动设置（仅打包版实际生效）
+  const settings = loadSettings();
+  if (settings.openAtLogin) {
+    applyLoginItem(true);
+  }
 });
 
 // 所有窗口关闭时：如果托盘存在则保持运行（最小化到托盘），否则退出
@@ -659,23 +689,26 @@ function isCommandNotFound(err) {
 /**
  * 检测单个工具的本地安装版本
  * @param {object} tool - 工具配置对象
+ * @param {object} [options] - { silent } 静默模式不发送日志（后台定时检测使用）
  * @returns {Promise<object>} { installed, version, normalizedVersion, notFound, error }
  */
-async function checkLocalVersion(tool) {
+async function checkLocalVersion(tool, options = {}) {
+  // 静默模式（后台定时检测）不输出日志，避免刷屏
+  const log = options.silent ? () => {} : sendLog;
   // AtomCode 在 Windows 上安装到用户目录，可能不在 PATH，需要先尝试全路径
   if (tool.id === 'atomcode' && os.platform() === 'win32') {
     const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
     const fullPath = path.join(localAppData, 'AtomCode', 'atomcode.exe');
     const exists = fs.existsSync(fullPath);
-    sendLog('info', 'atomcode', `检测本地路径: ${fullPath} (是否存在: ${exists})`);
+    log('info', 'atomcode', `检测本地路径: ${fullPath} (是否存在: ${exists})`);
     if (exists) {
       try {
         const output = await execCommand(fullPath, [tool.versionArg], { shell: false });
         const version = output.split(/\r?\n/)[0].trim();
-        sendLog('info', 'atomcode', `检测到本地版本: ${version}`);
+        log('info', 'atomcode', `检测到本地版本: ${version}`);
         return { installed: true, version, normalizedVersion: extractVersionNumber(version) };
       } catch (err) {
-        sendLog('error', 'atomcode', `执行全路径检测失败: ${err.message}`);
+        log('error', 'atomcode', `执行全路径检测失败: ${err.message}`);
       }
     }
   }
@@ -835,12 +868,14 @@ async function checkLatestVersion(tool) {
 /**
  * 检测单个工具的完整版本信息（本地 + 远端并行查询）
  * @param {object} tool - 工具配置对象
+ * @param {object} [options] - { silent } 静默模式不发送日志（后台定时检测使用）
  * @returns {Promise<object>} 合并后的检测结果，包含 needsUpdate 标志
  */
-async function checkTool(tool) {
-  sendLog('info', tool.id, `正在检测 ${tool.name} ...`);
+async function checkTool(tool, options = {}) {
+  const log = options.silent ? () => {} : sendLog;
+  log('info', tool.id, `正在检测 ${tool.name} ...`);
   const [local, remote] = await Promise.all([
-    checkLocalVersion(tool),
+    checkLocalVersion(tool, options),
     checkLatestVersion(tool)
   ]);
   const localNorm = local.normalizedVersion || extractVersionNumber(local.version);
@@ -866,7 +901,7 @@ async function checkTool(tool) {
   const remoteDesc = remote.latest
     ? remote.latest
     : (remote.error ? `无远端信息 (${remote.error.slice(0, 30)})` : '检测失败');
-  sendLog('success', tool.id, `${tool.name}: ${local.installed ? local.version : '未安装'} -> ${remoteDesc}`);
+  log('success', tool.id, `${tool.name}: ${local.installed ? local.version : '未安装'} -> ${remoteDesc}`);
   return result;
 }
 
@@ -1045,15 +1080,6 @@ async function doInstallOrUpdate(toolId) {
 }
 
 // ===== 卸载执行 =====
-
-// 通过官方安装脚本安装的工具：无统一卸载命令，提供文档链接引导
-const SCRIPT_INSTALLED_TOOLS = {
-  antigravity: { docsUrl: 'https://antigravity.google/' },
-  atomcode: { docsUrl: 'https://atomgit.com/' },
-  qoder: { docsUrl: 'https://qoder.com/' },
-  qoder_cn: { docsUrl: 'https://qoder.com.cn/' },
-  grok: { docsUrl: 'https://x.ai/' }
-};
 
 /**
  * 执行单个工具的卸载
@@ -1359,11 +1385,14 @@ ipcMain.handle('get-settings', () => {
   return loadSettings();
 });
 
-// 保存设置，如果后台检测间隔有变化则重启定时器
+// 保存设置，如果后台检测间隔有变化则重启定时器，开机自启变化则应用登录项
 ipcMain.handle('save-settings', (event, newSettings) => {
   saveSettings(newSettings);
   if ('backgroundCheckHours' in newSettings) {
     startBackgroundCheck();
+  }
+  if ('openAtLogin' in newSettings) {
+    applyLoginItem(newSettings.openAtLogin);
   }
   return { success: true };
 });

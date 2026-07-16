@@ -52,6 +52,7 @@ const btnSettingsCancel = document.getElementById('btn-settings-cancel');
 const btnSettingsSave = document.getElementById('btn-settings-save');
 const selectBgCheck = document.getElementById('select-bg-check');
 const checkMinimizeTray = document.getElementById('check-minimize-tray');
+const checkOpenAtLogin = document.getElementById('check-open-at-login');
 
 // 自定义镜像源模态框
 const registryOverlay = document.getElementById('registry-overlay');
@@ -292,6 +293,7 @@ async function openSettings() {
     const hours = settings.backgroundCheckHours ?? 4;
     selectBgCheck.value = String(hours);
     checkMinimizeTray.checked = settings.minimizeToTray !== false;
+    checkOpenAtLogin.checked = !!settings.openAtLogin;
     settingsOverlay.style.display = 'flex';
   } catch (err) {
     appendLog('error', 'system', `加载设置失败: ${err.message}`);
@@ -306,9 +308,10 @@ async function saveSettingsFromUI() {
   try {
     const backgroundCheckHours = parseInt(selectBgCheck.value, 10);
     const minimizeToTray = checkMinimizeTray.checked;
-    await window.electronAPI.saveSettings({ backgroundCheckHours, minimizeToTray });
+    const openAtLogin = checkOpenAtLogin.checked;
+    await window.electronAPI.saveSettings({ backgroundCheckHours, minimizeToTray, openAtLogin });
     closeSettings();
-    appendLog('success', 'system', `设置已保存：后台检测 ${backgroundCheckHours === 0 ? '已关闭' : `每 ${backgroundCheckHours} 小时`}，托盘最小化 ${minimizeToTray ? '开' : '关'}`);
+    appendLog('success', 'system', `设置已保存：后台检测 ${backgroundCheckHours === 0 ? '已关闭' : `每 ${backgroundCheckHours} 小时`}，托盘最小化 ${minimizeToTray ? '开' : '关'}，开机自启 ${openAtLogin ? '开' : '关'}`);
   } catch (err) {
     appendLog('error', 'system', `保存设置失败: ${err.message}`);
   }
@@ -456,6 +459,12 @@ function renderTools() {
     // 可更新时"最新"版本号高亮
     const latestClass = cls.canUpdate ? 'version-value version-highlight' : 'version-value';
 
+    // changelog 入口：脚本安装工具用官网，npm 工具指向 npmjs 包页
+    const changelogUrl = tool.docsUrl || (tool.pkg ? `https://www.npmjs.com/package/${tool.pkg}` : '');
+    const changelogLink = changelogUrl
+      ? `<button class="changelog-link" data-url="${escapeHtml(changelogUrl)}" title="查看 ${escapeHtml(tool.name)} 更新说明" type="button">🔗</button>`
+      : '';
+
     card.innerHTML = `
       <div class="card-progress"></div>
       <div class="tool-header">
@@ -472,6 +481,7 @@ function renderTools() {
           <span class="version-label">最新</span>
           <span class="${latestClass}" title="${escapeHtml(tool.latestVersion || '')}">${escapeHtml(tool.latestVersion || '-')}</span>
         </div>
+        ${changelogLink}
       </div>
       <div class="tool-actions">
         ${actionBtn}
@@ -512,6 +522,14 @@ function renderTools() {
     btn.addEventListener('click', (e) => {
       const id = e.currentTarget.dataset.id;
       removeCustomTool(id);
+    });
+  });
+
+  // 绑定 changelog 链接
+  document.querySelectorAll('.changelog-link').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const url = e.currentTarget.dataset.url;
+      if (url) window.electronAPI.openExternal(url);
     });
   });
 
