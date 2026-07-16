@@ -370,55 +370,56 @@ function renderSkeleton(tools) {
   }
 }
 
+// ===== 工具状态分类（卡片渲染与统计摘要共用，保证口径一致） =====
+// rank 用于排序：可更新(0) → 未安装/检测失败(1) → 远端检测失败(2) → 本地较新(3) → 最新(4)
+// stat 用于统计条口径：与卡片状态徽章一一对应（"本地较新"计入 latest）
+function classifyTool(tool) {
+  if (tool.notFound) {
+    return { rank: 1, statusClass: 'status-not-installed', statusText: '未安装', canUpdate: false, canInstall: true, stat: 'install', cardClass: 'card-not-installed' };
+  }
+  if (tool.error && !tool.installed) {
+    return { rank: 1, statusClass: 'status-error', statusText: '检测失败', canUpdate: false, canInstall: true, stat: 'error', cardClass: 'card-error' };
+  }
+  if (tool.needsUpdate) {
+    return { rank: 0, statusClass: 'status-update', statusText: '可更新', canUpdate: true, canInstall: false, stat: 'update', cardClass: 'card-update' };
+  }
+  if (tool.installed && tool.isAhead) {
+    return { rank: 3, statusClass: 'status-latest', statusText: '本地较新', canUpdate: false, canInstall: false, stat: 'latest', cardClass: 'card-latest' };
+  }
+  if (tool.installed && tool.latestVersion) {
+    return { rank: 4, statusClass: 'status-latest', statusText: '最新', canUpdate: false, canInstall: false, stat: 'latest', cardClass: 'card-latest' };
+  }
+  if (tool.installed) {
+    return { rank: 2, statusClass: 'status-error', statusText: '远端检测失败', canUpdate: true, canInstall: false, stat: 'error', cardClass: 'card-error' };
+  }
+  return { rank: 1, statusClass: 'status-not-installed', statusText: '未安装', canUpdate: false, canInstall: true, stat: 'install', cardClass: 'card-not-installed' };
+}
+
 // ===== 渲染工具卡片 =====
 function renderTools() {
   toolsGrid.innerHTML = '';
   let updateCount = 0;
   let installCount = 0;
+  const stats = { update: 0, install: 0, latest: 0, error: 0 };
 
-  for (const tool of toolsData) {
+  // 按状态排序（稳定排序，同类内保持原顺序）
+  const sorted = [...toolsData].sort((a, b) => classifyTool(a).rank - classifyTool(b).rank);
+
+  for (const tool of sorted) {
+    const cls = classifyTool(tool);
+    stats[cls.stat]++;
+    if (cls.canUpdate) updateCount++;
+    if (cls.canInstall) installCount++;
+
     const card = document.createElement('div');
-    card.className = 'tool-card';
+    card.className = `tool-card ${cls.cardClass}`;
     card.dataset.id = tool.id;
-
-    let statusClass = 'status-not-installed';
-    let statusText = '未安装';
-    let canUpdate = false;
-    let canInstall = false;
-
-    if (tool.notFound) {
-      statusClass = 'status-not-installed';
-      statusText = '未安装';
-      canInstall = true; // 未安装的工具可以一键安装
-      installCount++;
-    } else if (tool.error && !tool.installed) {
-      statusClass = 'status-error';
-      statusText = '检测失败';
-      canInstall = true; // 检测失败且未安装，也允许安装（可能只是命令不存在检测未匹配）
-      installCount++;
-    } else if (tool.needsUpdate) {
-      statusClass = 'status-update';
-      statusText = '可更新';
-      canUpdate = true;
-      updateCount++;
-    } else if (tool.installed && tool.isAhead) {
-      // 本地版本比远端新：不算“可更新”，避免误导用户降级
-      statusClass = 'status-latest';
-      statusText = '本地较新';
-    } else if (tool.installed && tool.latestVersion) {
-      statusClass = 'status-latest';
-      statusText = '最新';
-    } else if (tool.installed) {
-      statusClass = 'status-error';
-      statusText = '远端检测失败';
-      canUpdate = true; // 无法自动比对版本时，仍允许手动重新执行安装/更新脚本
-    }
 
     // 动作按钮：更新 / 安装 / 禁用
     let actionBtn = '';
-    if (canUpdate) {
+    if (cls.canUpdate) {
       actionBtn = `<button class="btn btn-primary btn-update btn-sm" data-id="${escapeHtml(tool.id)}" ${isUpdating ? 'disabled' : ''}>更新</button>`;
-    } else if (canInstall) {
+    } else if (cls.canInstall) {
       actionBtn = `<button class="btn btn-success btn-install btn-sm" data-id="${escapeHtml(tool.id)}" ${isUpdating ? 'disabled' : ''}>安装</button>`;
     } else {
       actionBtn = `<button class="btn btn-primary btn-sm" disabled>已是最新</button>`;
@@ -439,10 +440,13 @@ function renderTools() {
     // 自定义工具标识
     const customBadge = tool.isCustom ? '<span class="custom-badge">自定义</span>' : '';
 
+    // 可更新时"最新"版本号高亮
+    const latestClass = cls.canUpdate ? 'version-value version-highlight' : 'version-value';
+
     card.innerHTML = `
       <div class="tool-header">
         <h3 class="tool-name">${escapeHtml(tool.name)} ${customBadge}</h3>
-        <span class="tool-status ${statusClass}">${statusText}</span>
+        <span class="tool-status ${cls.statusClass}">${cls.statusText}</span>
       </div>
       <div class="version-info">
         <div class="version-item">
@@ -452,7 +456,7 @@ function renderTools() {
         <span class="version-arrow">→</span>
         <div class="version-item">
           <span class="version-label">最新</span>
-          <span class="version-value" title="${escapeHtml(tool.latestVersion || '')}">${escapeHtml(tool.latestVersion || '-')}</span>
+          <span class="${latestClass}" title="${escapeHtml(tool.latestVersion || '')}">${escapeHtml(tool.latestVersion || '-')}</span>
         </div>
       </div>
       <div class="tool-actions">
@@ -500,6 +504,23 @@ function renderTools() {
   btnUpdateAll.disabled = updateCount === 0 || isUpdating;
   // 当有未安装工具且不在更新状态时，启用一键安装
   if (btnInstallAll) btnInstallAll.disabled = installCount === 0 || isUpdating;
+
+  updateStatsBar(stats);
+}
+
+// ===== 统计摘要条 =====
+function updateStatsBar(stats) {
+  const bar = document.getElementById('stats-bar');
+  if (!bar) return;
+  if (!toolsData.length) {
+    bar.style.display = 'none';
+    return;
+  }
+  bar.style.display = 'flex';
+  document.getElementById('stat-update').textContent = stats.update;
+  document.getElementById('stat-install').textContent = stats.install;
+  document.getElementById('stat-latest').textContent = stats.latest;
+  document.getElementById('stat-error').textContent = stats.error;
 }
 
 // ===== 检测版本 =====
