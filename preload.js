@@ -84,13 +84,35 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   // 监听主进程触发的检测命令（从托盘菜单触发）
+  // 返回取消订阅函数，防止多次绑定导致重复触发
   onTriggerCheck: (callback) => {
-    ipcRenderer.on('trigger-check', () => callback());
+    const wrapped = () => callback();
+    ipcRenderer.on('trigger-check', wrapped);
+    return () => ipcRenderer.removeListener('trigger-check', wrapped);
   },
+
+  // 监听单个工具检测完成（流式推送，每检测完一个工具推送一次）
+  onToolChecked: (callback) => {
+    const wrapped = (event, data) => callback(data);
+    ipcRenderer.on('tool-checked', wrapped);
+    return () => ipcRenderer.removeListener('tool-checked', wrapped);
+  },
+
+  // 监听主进程发来的高亮指定工具指令（通知点击后定位）
+  onHighlightTool: (callback) => {
+    const wrapped = (event, toolId) => callback(toolId);
+    ipcRenderer.on('highlight-tool', wrapped);
+    return () => ipcRenderer.removeListener('highlight-tool', wrapped);
+  },
+
+  // 对指定镜像源 URL 测速（通过 npm ping 命令）
+  pingRegistry: (url) => ipcRenderer.invoke('ping-registry', url),
 
   // 移除所有日志监听（方便重新绑定）
   removeAllLogListeners: () => {
     ipcRenderer.removeAllListeners('update-log');
     ipcRenderer.removeAllListeners('trigger-check');
+    ipcRenderer.removeAllListeners('tool-checked');
+    ipcRenderer.removeAllListeners('highlight-tool');
   }
 });

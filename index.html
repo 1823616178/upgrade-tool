@@ -85,10 +85,10 @@
 
         <main class="main">
             <div id="stats-bar" class="stats-bar" style="display: none;">
-                <span class="stat-chip stat-chip-update">🚀 <b id="stat-update">0</b> 可更新</span>
-                <span class="stat-chip stat-chip-install">📦 <b id="stat-install">0</b> 未安装</span>
-                <span class="stat-chip stat-chip-latest">✅ <b id="stat-latest">0</b> 最新</span>
-                <span class="stat-chip stat-chip-error">⚠️ <b id="stat-error">0</b> 检测失败</span>
+                <span class="stat-chip stat-chip-update" data-filter="update" title="点击过滤可更新工具">🚀 <b id="stat-update">0</b> 可更新</span>
+                <span class="stat-chip stat-chip-install" data-filter="install" title="点击过滤未安装工具">📦 <b id="stat-install">0</b> 未安装</span>
+                <span class="stat-chip stat-chip-latest" data-filter="latest" title="点击过滤最新工具">✅ <b id="stat-latest">0</b> 最新</span>
+                <span class="stat-chip stat-chip-error" data-filter="error" title="点击过滤检测失败工具">⚠️ <b id="stat-error">0</b> 检测失败</span>
             </div>
 
             <div id="tools-grid" class="tools-grid">
@@ -200,6 +200,14 @@
                         <span>开机自动启动（仅安装版生效）</span>
                     </label>
                 </div>
+                <!-- 镜像源测速 -->
+                <div class="form-group">
+                    <div style="display:flex; align-items:center; justify-content:space-between;">
+                        <label style="margin:0">🏃 镜像源延迟测试</label>
+                        <button id="btn-ping-registry" class="btn btn-tool btn-sm" type="button" onclick="pingAllRegistries()">🚀 测速</button>
+                    </div>
+                    <div id="registry-speed-results" class="ping-results" style="display:none;"></div>
+                </div>
             </div>
             <div class="modal-footer">
                 <button id="btn-settings-cancel" class="btn btn-ghost">取消</button>
@@ -226,6 +234,23 @@
             <div class="modal-footer">
                 <button id="btn-registry-cancel" class="btn btn-ghost">取消</button>
                 <button id="btn-registry-save" class="btn btn-primary">使用此源</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 自定义确认弹框（替代原生 confirm()，样式与整体 UI 一致） -->
+    <div id="confirm-overlay" class="modal-overlay" style="display: none;">
+        <div class="modal modal-confirm">
+            <div class="modal-header">
+                <h3 id="confirm-title">确认操作</h3>
+                <button id="btn-confirm-close" class="btn-modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p id="confirm-message" class="confirm-message"></p>
+            </div>
+            <div class="modal-footer">
+                <button id="btn-confirm-cancel" class="btn btn-ghost">取消</button>
+                <button id="btn-confirm-ok" class="btn btn-primary">确认</button>
             </div>
         </div>
     </div>

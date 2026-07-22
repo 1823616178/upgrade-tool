@@ -1,9 +1,15 @@
 // ===== 状态变量 =====
 let toolsData = [];
 let isChecking = false;
-let isUpdating = false;
+/**
+ * 工具级操作锁（替代全局 isUpdating 布尔）
+ * 使用 Set 维护“正在操作”的工具 ID，支持同时操作多个工具
+ */
+const updatingTools = new Set();
 /** 切换到「自定义源」前，记住当前选中的镜像源，取消时可恢复 */
 let previousRegistryUrl = '';
+/** stats 栏当前过滤状态（null=无过滤，字符串=展示对应类别） */
+let statsFilter = null;
 
 // ===== 日志数据（过滤视图的数据源；复制/导出始终作用于全部条目） =====
 const MAX_LOG_ENTRIES = 2000; // 上限，防止长时间运行内存无限增长
@@ -73,7 +79,7 @@ async function init() {
     renderSkeletonFromTools()
   ]);
 
-  // 启动时自动检测一次
+  // 加载完成后旦即启动流式检测
   await checkVersions();
 }
 
@@ -152,6 +158,14 @@ function bindLogListener() {
   // 监听托盘菜单发出的检测命令
   window.electronAPI.onTriggerCheck(() => {
     checkVersions();
+  });
+  // 监听流式检测结果（每检测完一个工具就更新对应卡片）
+  window.electronAPI.onToolChecked((result) => {
+    onSingleToolChecked(result);
+  });
+  // 监听高亮指定工具（来自系统通知点击）
+  window.electronAPI.onHighlightTool((toolId) => {
+    highlightToolCard(toolId);
   });
 }
 
@@ -431,11 +445,15 @@ function renderTools() {
   // 按状态排序（稳定排序，同类内保持原顺序）
   const sorted = [...toolsData].sort((a, b) => classifyTool(a).rank - classifyTool(b).rank);
 
-  for (const tool of sorted) {
+  for (let cardIdx = 0; cardIdx < sorted.length; cardIdx++) {
+    const tool = sorted[cardIdx];
     const cls = classifyTool(tool);
     stats[cls.stat]++;
     if (cls.canUpdate) updateCount++;
     if (cls.canInstall) installCount++;
+
+    // stats 栏过滤：如果当前有活跃过滤，只显示匹配类别的卡片
+    if (statsFilter && cls.stat !== statsFilter) continue;
 
     const card = document.createElement('div');
     card.className = `tool-card ${cls.cardClass}`;
@@ -444,9 +462,9 @@ function renderTools() {
     // 动作按钮：更新 / 安装 / 禁用
     let actionBtn = '';
     if (cls.canUpdate) {
-      actionBtn = `<button class="btn btn-primary btn-update btn-sm" data-id="${escapeHtml(tool.id)}" ${isUpdating ? 'disabled' : ''}>更新</button>`;
+      actionBtn = `<button class="btn btn-primary btn-update btn-sm" data-id="${escapeHtml(tool.id)}" ${updatingTools.has(tool.id) ? 'disabled' : ''}>更新</button>`;
     } else if (cls.canInstall) {
-      actionBtn = `<button class="btn btn-success btn-install btn-sm" data-id="${escapeHtml(tool.id)}" ${isUpdating ? 'disabled' : ''}>安装</button>`;
+      actionBtn = `<button class="btn btn-success btn-install btn-sm" data-id="${escapeHtml(tool.id)}" ${updatingTools.has(tool.id) ? 'disabled' : ''}>安装</button>`;
     } else {
       actionBtn = `<button class="btn btn-primary btn-sm" disabled>已是最新</button>`;
     }
@@ -454,7 +472,7 @@ function renderTools() {
     // 已安装的工具附加卸载按钮
     let uninstallBtn = '';
     if (tool.installed) {
-      uninstallBtn = `<button class="btn btn-danger-ghost btn-uninstall btn-sm" data-id="${escapeHtml(tool.id)}" ${isUpdating ? 'disabled' : ''}>卸载</button>`;
+      uninstallBtn = `<button class="btn btn-danger-ghost btn-uninstall btn-sm" data-id="${escapeHtml(tool.id)}" ${updatingTools.has(tool.id) ? 'disabled' : ''}>卸载</button>`;
     }
 
     // 自定义工具附加删除按钮
@@ -503,8 +521,8 @@ function renderTools() {
     `;
 
     toolsGrid.appendChild(card);
-    // 入场动画逐张延迟
-    card.style.animationDelay = `${sorted.indexOf(tool) * 30}ms`;
+    // 入场动画逐张延迟（用 cardIdx 取代 O(n) indexOf）
+    card.style.animationDelay = `${cardIdx * 30}ms`;
   }
 
   // 绑定更新按钮
@@ -547,9 +565,9 @@ function renderTools() {
     });
   });
 
-  btnUpdateAll.disabled = updateCount === 0 || isUpdating;
+  btnUpdateAll.disabled = updateCount === 0 || updatingTools.size > 0;
   // 当有未安装工具且不在更新状态时，启用一键安装
-  if (btnInstallAll) btnInstallAll.disabled = installCount === 0 || isUpdating;
+  if (btnInstallAll) btnInstallAll.disabled = installCount === 0 || updatingTools.size > 0;
 
   updateStatsBar(stats);
   updateLogToolFilter();
@@ -568,17 +586,28 @@ function updateStatsBar(stats) {
   document.getElementById('stat-install').textContent = stats.install;
   document.getElementById('stat-latest').textContent = stats.latest;
   document.getElementById('stat-error').textContent = stats.error;
+
+  // 更新各统计概率上的活跃状态（点击可过滤）
+  const chips = bar.querySelectorAll('.stat-chip[data-filter]');
+  chips.forEach(chip => {
+    const filter = chip.dataset.filter;
+    chip.classList.toggle('stat-chip-active', statsFilter === filter);
+  });
 }
 
 // ===== 检测版本 =====
 async function checkVersions() {
   if (isChecking) return;
   isChecking = true;
+  // 重置头部 stats 过滤，防止旧过滤干扰新结果
+  statsFilter = null;
   btnCheck.disabled = true;
   btnCheck.innerHTML = '<span class="icon">⏳</span> 检测中...';
   // 不再自动清空日志，方便对照历史输出；需要清空请点「清空」
   appendLog('info', 'system', '开始检测所有工具版本...');
 
+  // 流式检测：初始化工具数据（骨架屏状态）后，每检测完一个通过 onToolChecked 即时刷新对应卡片
+  // 最终 checkVersions 返回全部结果（用于应急投票原则等）
   try {
     toolsData = await window.electronAPI.checkVersions();
     renderTools();
@@ -592,10 +621,27 @@ async function checkVersions() {
   }
 }
 
+/**
+ * 流式检测回调：单个工具检测完成时立即更新对应卡片
+ * @param {object} result - checkTool 返回的单个工具结果
+ */
+function onSingleToolChecked(result) {
+  if (!result || !result.id) return;
+  const idx = toolsData.findIndex(t => t.id === result.id);
+  if (idx !== -1) {
+    toolsData[idx] = result;
+  } else {
+    // 首次检测时，数据可能还未充充，直接 push
+    toolsData.push(result);
+  }
+  // 局部更新对应卡片（流式更新不重渲染全部卡片，再比较性能）
+  updateSingleCard(result);
+}
+
 // ===== 更新单个工具 =====
 async function updateTool(toolId) {
-  if (isUpdating) return;
-  isUpdating = true;
+  if (updatingTools.has(toolId)) return;
+  updatingTools.add(toolId);
   updateUIState(true, toolId);
 
   try {
@@ -607,16 +653,16 @@ async function updateTool(toolId) {
   } catch (err) {
     appendLog('error', toolId, `更新异常: ${err.message}`);
   } finally {
-    isUpdating = false;
-    updateUIState(false);
+    updatingTools.delete(toolId);
+    updateUIState(false, toolId);
     await refreshSingleTool(toolId);
   }
 }
 
 // ===== 安装单个工具（新增功能） =====
 async function installTool(toolId) {
-  if (isUpdating) return;
-  isUpdating = true;
+  if (updatingTools.has(toolId)) return;
+  updatingTools.add(toolId);
   updateUIState(true, toolId);
 
   try {
@@ -628,8 +674,8 @@ async function installTool(toolId) {
   } catch (err) {
     appendLog('error', toolId, `安装异常: ${err.message}`);
   } finally {
-    isUpdating = false;
-    updateUIState(false);
+    updatingTools.delete(toolId);
+    updateUIState(false, toolId);
     await refreshSingleTool(toolId);
   }
 }
@@ -676,11 +722,18 @@ async function openPowerShell() {
 
 // ===== 卸载单个工具 =====
 async function uninstallTool(toolId) {
-  if (isUpdating) return;
+  if (updatingTools.has(toolId)) return;
   const name = getToolName(toolId);
-  if (!confirm(`确定要卸载 ${name} 吗？`)) return;
+  // 使用自定义模态框替代原生 confirm()
+  const confirmed = await showConfirmModal(
+    `确定卸载 ${name}？`,
+    `将卸载 <b>${name}</b>。未安装的 npm 包将被移除。`,
+    '卸载',
+    'danger'
+  );
+  if (!confirmed) return;
 
-  isUpdating = true;
+  updatingTools.add(toolId);
   updateUIState(true, toolId);
 
   try {
@@ -689,15 +742,21 @@ async function uninstallTool(toolId) {
     if (!result.success) {
       appendLog('error', toolId, result.message || '卸载失败');
       // 脚本安装类工具：引导打开官方文档
-      if (result.docsUrl && confirm(`${name} 需手动卸载。\n是否打开官方文档？\n\n${result.docsUrl}`)) {
-        await window.electronAPI.openExternal(result.docsUrl);
+      if (result.docsUrl) {
+        const goDoc = await showConfirmModal(
+          `${name} 需手动卸载`,
+          `${name} 通过官方脚本安装，无统一卸载命令。是否打开官方文档？<br><small style="color:var(--text-muted)">${result.docsUrl}</small>`,
+          '打开官方文档',
+          'primary'
+        );
+        if (goDoc) await window.electronAPI.openExternal(result.docsUrl);
       }
     }
   } catch (err) {
     appendLog('error', toolId, `卸载异常: ${err.message}`);
   } finally {
-    isUpdating = false;
-    updateUIState(false);
+    updatingTools.delete(toolId);
+    updateUIState(false, toolId);
     await refreshSingleTool(toolId);
   }
 }
@@ -705,7 +764,13 @@ async function uninstallTool(toolId) {
 // ===== 移除自定义工具 =====
 async function removeCustomTool(toolId) {
   const name = getToolName(toolId);
-  if (!confirm(`确定要从列表中移除自定义工具「${name}」吗？\n（不会卸载已安装的 npm 包）`)) return;
+  const confirmed = await showConfirmModal(
+    `移除自定义工具`,
+    `确定要从列表中移除「${name}」吗？<br><small style="color:var(--text-muted)">不会卸载已安装的 npm 包</small>`,
+    '移除',
+    'danger'
+  );
+  if (!confirmed) return;
   try {
     await window.electronAPI.removeCustomTool(toolId);
     appendLog('info', 'system', `自定义工具 "${name}" 已移除`);
@@ -722,8 +787,7 @@ async function updateAll() {
   const ids = toolsData.filter(t => t.needsUpdate).map(t => t.id);
   if (ids.length === 0) return;
 
-  if (isUpdating) return;
-  isUpdating = true;
+  if (updatingTools.size > 0) return;
 
   appendLog('start', 'system', `开始一键更新 ${ids.length} 个工具...`);
 
@@ -731,19 +795,20 @@ async function updateAll() {
     for (let i = 0; i < ids.length; i++) {
       const toolId = ids[i];
       btnUpdateAll.innerHTML = `<span class="icon">⏳</span> 更新中 (${i + 1}/${ids.length})`;
+      updatingTools.add(toolId);
       updateUIState(true, toolId);
       appendLog('start', toolId, `开始更新 ${getToolName(toolId)} ...`);
       const result = await window.electronAPI.updateTool(toolId);
       if (!result.success) {
         appendLog('error', toolId, result.message || '更新失败');
       }
+      updatingTools.delete(toolId);
       await refreshSingleTool(toolId);
     }
     appendLog('success', 'system', '全部更新任务执行完毕');
   } catch (err) {
     appendLog('error', 'system', `一键更新异常: ${err.message}`);
   } finally {
-    isUpdating = false;
     btnUpdateAll.innerHTML = '<span class="icon">🚀</span> 一键更新全部';
     updateUIState(false);
     await silentRefreshAll();
@@ -755,8 +820,7 @@ async function installAll() {
   const ids = toolsData.filter(t => !t.installed).map(t => t.id);
   if (ids.length === 0) return;
 
-  if (isUpdating) return;
-  isUpdating = true;
+  if (updatingTools.size > 0) return;
 
   appendLog('start', 'system', `开始一键安装 ${ids.length} 个工具...`);
 
@@ -764,19 +828,20 @@ async function installAll() {
     for (let i = 0; i < ids.length; i++) {
       const toolId = ids[i];
       btnInstallAll.innerHTML = `<span class="icon">⏳</span> 安装中 (${i + 1}/${ids.length})`;
+      updatingTools.add(toolId);
       updateUIState(true, toolId);
       appendLog('start', toolId, `开始安装 ${getToolName(toolId)} ...`);
       const result = await window.electronAPI.installTool(toolId);
       if (!result.success) {
         appendLog('error', toolId, result.message || '安装失败');
       }
+      updatingTools.delete(toolId);
       await refreshSingleTool(toolId);
     }
     appendLog('success', 'system', '全部安装任务执行完毕');
   } catch (err) {
     appendLog('error', 'system', `一键安装异常: ${err.message}`);
   } finally {
-    isUpdating = false;
     btnInstallAll.innerHTML = '<span class="icon">📦</span> 一键安装全部';
     updateUIState(false);
     await silentRefreshAll();
@@ -964,6 +1029,218 @@ function escapeHtml(text) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+// ===== 流式检测：局部更新单张卡片 =====
+/**
+ * 单个工具检测完成后，局部更新对应卡片而非重渲染全部
+ * 如果卡片不存在（骨架屏已销毁），降级为全量 renderTools
+ * @param {object} tool - 检测结果
+ */
+function updateSingleCard(tool) {
+  const existing = toolsGrid.querySelector(`.tool-card[data-id="${CSS.escape(tool.id)}"]`);
+  if (!existing) {
+    renderTools();
+    return;
+  }
+  const cls = classifyTool(tool);
+
+  // 更新状态徽章
+  const statusEl = existing.querySelector('.tool-status');
+  if (statusEl) {
+    statusEl.className = `tool-status ${cls.statusClass}`;
+    statusEl.textContent = cls.statusText;
+  }
+
+  // 更新卡片边条颜色（保留 updating 状态）
+  existing.className = `tool-card ${cls.cardClass}${existing.classList.contains('updating') ? ' updating' : ''}`;
+
+  // 更新版本号
+  const versionValues = existing.querySelectorAll('.version-value');
+  if (versionValues.length >= 2) {
+    versionValues[0].textContent = tool.currentVersion || '-';
+    versionValues[0].title = tool.currentVersion || '';
+    versionValues[1].className = cls.canUpdate ? 'version-value version-highlight' : 'version-value';
+    versionValues[1].textContent = tool.latestVersion || '-';
+    versionValues[1].title = tool.latestVersion || '';
+  }
+
+  // 更新操作按钮区域（局部替换）
+  const actionsEl = existing.querySelector('.tool-actions');
+  if (actionsEl) {
+    const isLocked = updatingTools.has(tool.id);
+    let actionBtn = '';
+    if (cls.canUpdate) {
+      actionBtn = `<button class="btn btn-primary btn-update btn-sm" data-id="${escapeHtml(tool.id)}" ${isLocked ? 'disabled' : ''}>更新</button>`;
+    } else if (cls.canInstall) {
+      actionBtn = `<button class="btn btn-success btn-install btn-sm" data-id="${escapeHtml(tool.id)}" ${isLocked ? 'disabled' : ''}>安装</button>`;
+    } else {
+      actionBtn = `<button class="btn btn-primary btn-sm" disabled>已是最新</button>`;
+    }
+    const uninstallBtn = tool.installed
+      ? `<button class="btn btn-danger-ghost btn-uninstall btn-sm" data-id="${escapeHtml(tool.id)}" ${isLocked ? 'disabled' : ''}>卸载</button>`
+      : '';
+    const removeBtn = tool.isCustom
+      ? `<button class="btn btn-danger-ghost btn-remove btn-sm" data-id="${escapeHtml(tool.id)}" title="移除此自定义工具">🗑️</button>`
+      : '';
+    const changelogUrl = tool.docsUrl || (tool.pkg ? `https://www.npmjs.com/package/${tool.pkg}` : '');
+    const changelogLink = changelogUrl
+      ? `<button class="btn btn-ghost btn-sm changelog-link" data-url="${escapeHtml(changelogUrl)}" title="查看更新说明" type="button">🔗</button>`
+      : '';
+    actionsEl.innerHTML = actionBtn + uninstallBtn + changelogLink + removeBtn;
+
+    // 重新绑定按钮事件
+    const updBtn = actionsEl.querySelector('.btn-update');
+    if (updBtn) updBtn.addEventListener('click', e => updateTool(e.currentTarget.dataset.id));
+    const instBtn = actionsEl.querySelector('.btn-install');
+    if (instBtn) instBtn.addEventListener('click', e => installTool(e.currentTarget.dataset.id));
+    const uninstBtn = actionsEl.querySelector('.btn-uninstall');
+    if (uninstBtn) uninstBtn.addEventListener('click', e => uninstallTool(e.currentTarget.dataset.id));
+    const rmBtn = actionsEl.querySelector('.btn-remove');
+    if (rmBtn) rmBtn.addEventListener('click', e => removeCustomTool(e.currentTarget.dataset.id));
+    const chgBtn = actionsEl.querySelector('.changelog-link');
+    if (chgBtn) chgBtn.addEventListener('click', e => {
+      const url = e.currentTarget.dataset.url;
+      if (url) window.electronAPI.openExternal(url);
+    });
+  }
+
+  // 同步顶部按钮状态
+  const hasUpdatable = toolsData.some(t => t.needsUpdate);
+  btnUpdateAll.disabled = !hasUpdatable || updatingTools.size > 0;
+}
+
+// ===== 高亮并滚动到指定工具卡片（通知点击后定位） =====
+/**
+ * 高亮指定工具的卡片并滚动至可视区域
+ * @param {string} toolId - 要高亮的工具 ID
+ */
+function highlightToolCard(toolId) {
+  if (!toolId) return;
+  const card = toolsGrid.querySelector(`.tool-card[data-id="${CSS.escape(toolId)}"]`);
+  if (!card) return;
+  card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  card.classList.add('card-highlighted');
+  card.addEventListener('animationend', () => {
+    card.classList.remove('card-highlighted');
+  }, { once: true });
+}
+
+// ===== 自定义确认弹框（替代原生 confirm()） =====
+/**
+ * 显示样式统一的确认弹框，返回 Promise<boolean>
+ * @param {string} title          - 弹框标题
+ * @param {string} message        - 弹框正文（支持 HTML）
+ * @param {string} confirmText    - 确认按钮文字
+ * @param {'danger'|'primary'} confirmVariant - 确认按钮风格
+ */
+function showConfirmModal(title, message, confirmText = '确认', confirmVariant = 'primary') {
+  return new Promise((resolve) => {
+    const overlay   = document.getElementById('confirm-overlay');
+    const titleEl   = document.getElementById('confirm-title');
+    const messageEl = document.getElementById('confirm-message');
+    const btnOk     = document.getElementById('btn-confirm-ok');
+    const btnCancel = document.getElementById('btn-confirm-cancel');
+    const btnClose  = document.getElementById('btn-confirm-close');
+
+    if (!overlay) {
+      // 降级：DOM 中无确认弹框时使用原生 confirm
+      resolve(window.confirm(`${title}\n${message.replace(/<[^>]*>/g, '')}`));
+      return;
+    }
+
+    titleEl.textContent  = title;
+    messageEl.innerHTML  = message;
+    btnOk.textContent    = confirmText;
+    btnOk.className      = `btn ${confirmVariant === 'danger' ? 'btn-danger-solid' : 'btn-primary'}`;
+    overlay.style.display = 'flex';
+
+    const cleanup = (result) => {
+      overlay.style.display = 'none';
+      btnOk.removeEventListener('click', onConfirm);
+      btnCancel.removeEventListener('click', onCancel);
+      btnClose.removeEventListener('click', onCancel);
+      overlay.removeEventListener('click', onOverlay);
+      document.removeEventListener('keydown', onKeydown);
+      resolve(result);
+    };
+    const onConfirm = () => cleanup(true);
+    const onCancel  = () => cleanup(false);
+    const onOverlay = (e) => { if (e.target === overlay) cleanup(false); };
+    const onKeydown = (e) => {
+      if (e.key === 'Escape') cleanup(false);
+      if (e.key === 'Enter')  cleanup(true);
+    };
+
+    btnOk.addEventListener('click', onConfirm);
+    btnCancel.addEventListener('click', onCancel);
+    btnClose.addEventListener('click', onCancel);
+    overlay.addEventListener('click', onOverlay);
+    document.addEventListener('keydown', onKeydown);
+
+    // 危险操作默认聚焦取消按钮，避免误操作
+    (confirmVariant === 'danger' ? btnCancel : btnOk).focus();
+  });
+}
+
+// ===== Stats 栏点击过滤绑定 =====
+// 点击统计类别 chip 切换过滤；再次点击取消过滤
+(function bindStatsFilter() {
+  const bar = document.getElementById('stats-bar');
+  if (!bar) return;
+  bar.addEventListener('click', (e) => {
+    const chip = e.target.closest('.stat-chip[data-filter]');
+    if (!chip) return;
+    const filter = chip.dataset.filter;
+    statsFilter = (statsFilter === filter) ? null : filter;
+    renderTools();
+    // 读取当前统计数字再更新 chip 活跃状态
+    updateStatsBar({
+      update:  parseInt(document.getElementById('stat-update').textContent,  10) || 0,
+      install: parseInt(document.getElementById('stat-install').textContent, 10) || 0,
+      latest:  parseInt(document.getElementById('stat-latest').textContent,  10) || 0,
+      error:   parseInt(document.getElementById('stat-error').textContent,   10) || 0,
+    });
+  });
+})();
+
+// ===== 镜像源测速 =====
+/**
+ * 对所有预设镜像源进行延迟测试，在设置弹框中展示结果
+ */
+async function pingAllRegistries() {
+  const speedResults = document.getElementById('registry-speed-results');
+  if (!speedResults) return;
+  const btnPing = document.getElementById('btn-ping-registry');
+  if (btnPing) { btnPing.disabled = true; btnPing.textContent = '测速中...'; }
+
+  speedResults.style.display = 'block';
+  speedResults.innerHTML = '<div class="ping-loading">正在测速，请稍候...</div>';
+
+  try {
+    const registries = await window.electronAPI.getRegistries();
+    const results = await Promise.all(
+      registries.map(async (reg) => {
+        const res = await window.electronAPI.pingRegistry(reg.url);
+        return { name: reg.name, url: reg.url, ...res };
+      })
+    );
+
+    speedResults.innerHTML = results.map(r => {
+      const ms = r.ms != null ? `${r.ms}ms` : '—';
+      const level = r.success && r.ms < 300 ? 'fast' : r.success && r.ms < 1000 ? 'medium' : 'slow';
+      const icon = r.success ? (level === 'fast' ? '🟢' : level === 'medium' ? '🟡' : '🔴') : '❌';
+      return `<div class="ping-row">
+        <span class="ping-icon">${icon}</span>
+        <span class="ping-name">${escapeHtml(r.name)}</span>
+        <span class="ping-ms ping-${level}">${r.success ? ms : (r.message || '超时')}</span>
+      </div>`;
+    }).join('');
+  } catch (err) {
+    speedResults.innerHTML = `<div class="ping-error">测速失败: ${escapeHtml(err.message)}</div>`;
+  } finally {
+    if (btnPing) { btnPing.disabled = false; btnPing.textContent = '🚀 测速'; }
+  }
 }
 
 // ===== 启动 =====

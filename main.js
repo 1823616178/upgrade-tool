@@ -15,6 +15,9 @@ const REGISTRIES = [
 
 // ===== 设置持久化 =====
 // 用户设置（镜像源、后台检测间隔等）保存在 userData/settings.json
+// 使用内存缓存避免高频磁盘读取
+
+let _settingsCache = null; // 内存缓存，null 表示尚未加载
 
 /**
  * 获取设置文件的完整路径
@@ -25,26 +28,34 @@ function getSettingsPath() {
 }
 
 /**
- * 从磁盘加载用户设置，文件不存在或解析失败时返回空对象
+ * 从内存缓存（或磁盘）加载用户设置
+ * 首次调用从磁盘读取并缓存，之后直接返回缓存副本
  * @returns {object} 解析后的设置对象
  */
 function loadSettings() {
+  if (_settingsCache !== null) {
+    return { ..._settingsCache }; // 返回副本，防止外部修改污染缓存
+  }
   try {
     const data = fs.readFileSync(getSettingsPath(), 'utf-8');
-    return JSON.parse(data);
+    _settingsCache = JSON.parse(data);
   } catch {
-    return {};
+    _settingsCache = {};
   }
+  return { ..._settingsCache };
 }
 
 /**
- * 将新设置合并到现有设置中并写入磁盘（保留未修改的字段）
+ * 将新设置合并到缓存并异步写入磁盘
  * @param {object} settings - 需要保存的部分设置
  */
 function saveSettings(settings) {
-  const current = loadSettings();
-  const merged = { ...current, ...settings };
-  fs.writeFileSync(getSettingsPath(), JSON.stringify(merged, null, 2), 'utf-8');
+  if (_settingsCache === null) loadSettings(); // 确保缓存已初始化
+  _settingsCache = { ..._settingsCache, ...settings };
+  // 异步写入磁盘，避免阻塞主线程
+  fs.writeFile(getSettingsPath(), JSON.stringify(_settingsCache, null, 2), 'utf-8', (err) => {
+    if (err) console.error('[settings] 写入失败:', err.message);
+  });
 }
 
 // 当前活跃的镜像源 URL，默认使用第一个（npm 官方源）
@@ -61,32 +72,67 @@ try {
 // ===== 内置工具配置 =====
 // 预定义的 AI 编码工具列表，包含 CLI 命令名和对应的 npm 包名
 // updateCmd 不再硬编码，而是根据当前镜像源动态生成（见 getAllTools）
+// installScript: { win, unix } — 脚本安装类工具的安装命令（数据驱动，消除 doInstallOrUpdate 中的 if/else 链）
 const BUILTIN_TOOLS = [
-  { id: 'kimi', name: 'Kimi Code', cmd: 'kimi', pkg: '@moonshot-ai/kimi-code', versionArg: '--version' },
-  { id: 'claude', name: 'Claude Code', cmd: 'claude', pkg: '@anthropic-ai/claude-code', versionArg: '--version' },
-  { id: 'codex', name: 'OpenAI Codex', cmd: 'codex', pkg: '@openai/codex', versionArg: '--version' },
-  { id: 'opencode', name: 'OpenCode', cmd: 'opencode', pkg: 'opencode-ai', versionArg: '--version' },
-  { id: 'codebuddy', name: 'CodeBuddy', cmd: 'codebuddy', pkg: '@tencent-ai/codebuddy-code', versionArg: '--version' },
-  { id: 'qwen', name: 'Qwen Code', cmd: 'qwen', pkg: '@qwen-code/qwen-code', versionArg: '--version' },
-  // antigravity 使用独立的安装脚本，不通过 npm 安装
-  { id: 'antigravity', name: 'Antigravity CLI', cmd: 'agy', versionArg: '--version' },
-  { id: 'atomcode', name: 'AtomCode', cmd: 'atomcode', versionArg: '--version' },
-  { id: 'qoder', name: 'Qoder CLI', cmd: 'qodercli', pkg: '@qoder-ai/qodercli', versionArg: '--version' },
-  // qoder_cn 安装的是 qoderclicn 命令，与国际版 qodercli 不同
-  { id: 'qoder_cn', name: 'Qoder CLI (国内镜像)', cmd: 'qoderclicn', versionArg: '--version' },
-  // grok 使用 xAI 官方安装脚本，不通过 npm 安装
-  { id: 'grok', name: 'Grok CLI', cmd: 'grok', versionArg: '--version' },
+  { id: 'kimi',       name: 'Kimi Code',              cmd: 'kimi',       pkg: '@moonshot-ai/kimi-code',        versionArg: '--version' },
+  { id: 'claude',     name: 'Claude Code',             cmd: 'claude',     pkg: '@anthropic-ai/claude-code',     versionArg: '--version' },
+  { id: 'codex',      name: 'OpenAI Codex',            cmd: 'codex',      pkg: '@openai/codex',                 versionArg: '--version' },
+  { id: 'opencode',   name: 'OpenCode',                cmd: 'opencode',   pkg: 'opencode-ai',                   versionArg: '--version' },
+  { id: 'codebuddy',  name: 'CodeBuddy',               cmd: 'codebuddy',  pkg: '@tencent-ai/codebuddy-code',    versionArg: '--version' },
+  { id: 'qwen',       name: 'Qwen Code',               cmd: 'qwen',       pkg: '@qwen-code/qwen-code',          versionArg: '--version' },
+  {
+    // antigravity 使用独立的安装脚本；已安装时改用 agy update（在 doInstallOrUpdate 中特判）
+    id: 'antigravity', name: 'Antigravity CLI', cmd: 'agy', versionArg: '--version',
+    installScript: {
+      win:  'Import-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue; irm https://antigravity.google/cli/install.ps1 | iex',
+      unix: 'curl -sSL https://antigravity.google/cli/install.sh | bash'
+    },
+    docsUrl: 'https://antigravity.google/'
+  },
+  {
+    id: 'atomcode', name: 'AtomCode', cmd: 'atomcode', versionArg: '--version',
+    installScript: {
+      // 先终止正在运行的进程再安装，最后写 PATH
+      win:  'Write-Host \'[AtomCode] Stopping running atomcode process...\'; taskkill /f /im atomcode.exe 2>$null | Out-Null; Start-Sleep -Milliseconds 800; Import-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue; irm https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/install.ps1 | iex; $atomDir = Join-Path $env:LOCALAPPDATA \'AtomCode\'; $userPath = [Environment]::GetEnvironmentVariable(\'PATH\', \'User\'); if ($userPath -notlike "*$atomDir*") { [Environment]::SetEnvironmentVariable(\'PATH\', "$userPath;$atomDir", \'User\'); Write-Host \'[AtomCode] Added atomcode dir to user PATH\' }',
+      unix: 'curl -fsSL https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/install.sh | sh'
+    },
+    docsUrl: 'https://atomgit.com/'
+  },
+  {
+    id: 'qoder', name: 'Qoder CLI', cmd: 'qodercli', pkg: '@qoder-ai/qodercli', versionArg: '--version',
+    installScript: {
+      win:  'Import-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue; irm https://qoder.com/install.ps1 | iex',
+      unix: 'curl -fsSL https://qoder.com/install | bash'
+    },
+    docsUrl: 'https://qoder.com/'
+  },
+  {
+    // qoder_cn 安装的是 qoderclicn 命令，与国际版 qodercli 不同
+    id: 'qoder_cn', name: 'Qoder CLI (国内镜像)', cmd: 'qoderclicn', versionArg: '--version',
+    installScript: {
+      win:  'Import-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue; irm https://qoder.com.cn/install.ps1 | iex',
+      unix: 'curl -fsSL https://qoder.com.cn/install | bash'
+    },
+    docsUrl: 'https://qoder.com.cn/'
+  },
+  {
+    // grok 使用 xAI 官方安装脚本，不通过 npm 安装
+    id: 'grok', name: 'Grok CLI', cmd: 'grok', versionArg: '--version',
+    installScript: {
+      win:  'Import-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue; irm https://x.ai/cli/install.ps1 | iex',
+      unix: 'curl -fsSL https://x.ai/cli/install | bash'
+    },
+    docsUrl: 'https://x.ai/'
+  },
 ];
 
-// 通过官方安装脚本安装的工具：无统一卸载命令，提供文档链接引导
-// （渲染层也用它生成 changelog 官网链接）
-const SCRIPT_INSTALLED_TOOLS = {
-  antigravity: { docsUrl: 'https://antigravity.google/' },
-  atomcode: { docsUrl: 'https://atomgit.com/' },
-  qoder: { docsUrl: 'https://qoder.com/' },
-  qoder_cn: { docsUrl: 'https://qoder.com.cn/' },
-  grok: { docsUrl: 'https://x.ai/' }
-};
+// 通过官方安装脚本安装的工具（用于判断是否支持自动卸载）
+// 直接从 BUILTIN_TOOLS 中提取有 installScript 的工具 ID
+const SCRIPT_INSTALLED_TOOLS = Object.fromEntries(
+  BUILTIN_TOOLS
+    .filter(t => t.installScript)
+    .map(t => [t.id, { docsUrl: t.docsUrl || '' }])
+);
 
 // ===== 自定义工具持久化 =====
 // 用户自定义的工具列表保存在 userData/custom-tools.json
@@ -345,13 +391,27 @@ function startBackgroundCheck() {
       const updatable = results.filter(r => r.needsUpdate);
       if (updatable.length > 0) {
         const names = updatable.map(t => t.name).join('、');
+        const firstUpdatableId = updatable[0].id; // 通知点击后高亮第一个可更新的工具
         const notification = new Notification({
           title: 'AI 工具有新版本可用',
           body: `${names} 有新版本，点击查看详情`,
           icon: path.join(__dirname, 'build', 'icon.png')
         });
         notification.on('click', () => {
-          showOrCreateWindow();
+          // 显示主窗口并送送高亮指令到渲染进程
+          const win = showOrCreateWindow();
+          if (win) {
+            const sendHighlight = () => {
+              if (!win.isDestroyed()) {
+                win.webContents.send('highlight-tool', firstUpdatableId);
+              }
+            };
+            if (win.webContents.isLoading()) {
+              win.webContents.once('did-finish-load', sendHighlight);
+            } else {
+              sendHighlight();
+            }
+          }
         });
         notification.show();
       }
@@ -810,7 +870,9 @@ async function checkLatestVersion(tool) {
         throw new Error(`HTTP error! status: ${res.status}`);
       }
       const data = await res.json();
-      return { latest: data.tag_name || 'v4.25.9' };
+      // Bug fix: 不再使用硬编码回退版本，API 失败时返回 null
+      if (!data.tag_name) throw new Error('API 响应中无 tag_name 字段');
+      return { latest: data.tag_name };
     } catch (err) {
       return { latest: null, error: err.message };
     }
@@ -879,12 +941,19 @@ async function checkLatestVersion(tool) {
     return { latest: null, error: (lastErr && lastErr.message) || 'grok channel 版本获取失败' };
   }
 
-  // 普通 npm 工具：查询 registry 最新版本
-  try {
-    const output = await execCommand('npm', ['view', tool.pkg, 'version', `--registry=${currentRegistry}`], { shell: true });
-    return { latest: output.trim() };
-  } catch (err) {
-    return { latest: null, error: err.message };
+  // 普通 npm 工具：查询 registry 最新版本（失败时自动重试 1 次）
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const output = await execCommand('npm', ['view', tool.pkg, 'version', `--registry=${currentRegistry}`], { shell: true });
+      return { latest: output.trim() };
+    } catch (err) {
+      if (attempt < 2) {
+        // 等待 2 秒后重试（网络抖动场景）
+        await new Promise(r => setTimeout(r, 2000));
+      } else {
+        return { latest: null, error: err.message };
+      }
+    }
   }
 }
 
@@ -943,10 +1012,10 @@ async function doInstallOrUpdate(toolId) {
   const tool = tools.find(t => t.id === toolId);
   if (!tool) throw new Error('未知工具');
 
-  // 校验：非 antigravity 工具必须有 updateCmd（即必须配置了 npm 包名）
-  if (tool.id !== 'antigravity' && !tool.updateCmd) {
-    sendLog('error', toolId, `${tool.name} 缺少安装命令（未配置 npm 包名）`);
-    return { success: false, message: '缺少安装命令（未配置 npm 包名）' };
+  // 无安装脚本且无 npm 包名：无法安装
+  if (!tool.installScript && !tool.pkg && !tool.updateCmd) {
+    sendLog('error', toolId, `${tool.name} 缺少安装命令（未配置 npm 包名或安装脚本）`);
+    return { success: false, message: '缺少安装命令' };
   }
 
   sendLog('start', tool.id, `开始安装/更新 ${tool.name} ...`);
@@ -955,77 +1024,41 @@ async function doInstallOrUpdate(toolId) {
   let shellCmd;
   let shellArgs;
 
-  if (isWin) {
+  // ===== 数据驱动：脚本安装类工具 =====
+  if (tool.installScript) {
     let powershellCmd = 'powershell.exe';
-    const sysnative = path.join(process.env.WINDIR || 'C:\\Windows', 'sysnative', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-    const system32 = path.join(process.env.WINDIR || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-    if (fs.existsSync(sysnative)) {
-      powershellCmd = sysnative;
-    } else if (fs.existsSync(system32)) {
-      powershellCmd = system32;
+    if (isWin) {
+      const sysnative = path.join(process.env.WINDIR || 'C:\\Windows', 'sysnative', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+      const system32  = path.join(process.env.WINDIR || 'C:\\Windows', 'System32',  'WindowsPowerShell', 'v1.0', 'powershell.exe');
+      if (fs.existsSync(sysnative))      powershellCmd = sysnative;
+      else if (fs.existsSync(system32))  powershellCmd = system32;
     }
 
     if (tool.id === 'antigravity') {
-      // antigravity 在 Windows 上需要区分已安装/未安装
+      // antigravity 已安装时使用内置 update 子命令，未安装时走官方脚本
       const localStatus = await checkLocalVersion(tool);
       if (localStatus.installed) {
-        shellCmd = 'cmd.exe';
-        shellArgs = ['/c', 'agy update'];
-      } else {
+        shellCmd = isWin ? 'cmd.exe' : 'sh';
+        shellArgs = isWin ? ['/c', 'agy update'] : ['-c', 'agy update'];
+      } else if (isWin) {
         shellCmd = powershellCmd;
-        shellArgs = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', 'Import-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue; irm https://antigravity.google/cli/install.ps1 | iex'];
+        shellArgs = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', tool.installScript.win];
+      } else {
+        shellCmd = 'sh';
+        shellArgs = ['-c', tool.installScript.unix];
       }
-    } else if (tool.id === 'atomcode') {
+    } else if (isWin) {
       shellCmd = powershellCmd;
-      // 先强制结束正在运行的 atomcode.exe（否则安装脚本无法覆盖文件），再安装，最后写 PATH
-      shellArgs = [
-        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
-        `Write-Host '[AtomCode] Stopping running atomcode process...'; ` +
-        `taskkill /f /im atomcode.exe 2>$null | Out-Null; ` +
-        `Start-Sleep -Milliseconds 800; ` +
-        `Import-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue; irm https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/install.ps1 | iex; ` +
-        `$atomDir = Join-Path $env:LOCALAPPDATA 'AtomCode'; ` +
-        `$userPath = [Environment]::GetEnvironmentVariable('PATH', 'User'); ` +
-        `if ($userPath -notlike "*$atomDir*") { ` +
-        `  [Environment]::SetEnvironmentVariable('PATH', "$userPath;$atomDir", 'User'); ` +
-        `  Write-Host '[AtomCode] Added atomcode dir to user PATH' ` +
-        `}`
-      ];
-    } else if (tool.id === 'qoder') {
-      shellCmd = powershellCmd;
-      shellArgs = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', 'Import-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue; irm https://qoder.com/install.ps1 | iex'];
-    } else if (tool.id === 'qoder_cn') {
-      shellCmd = powershellCmd;
-      shellArgs = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', 'Import-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue; irm https://qoder.com.cn/install.ps1 | iex'];
-    } else if (tool.id === 'grok') {
-      shellCmd = powershellCmd;
-      shellArgs = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', 'Import-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue; irm https://x.ai/cli/install.ps1 | iex'];
+      shellArgs = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', tool.installScript.win];
     } else {
-      shellCmd = 'cmd.exe';
-      shellArgs = ['/c', tool.updateCmd];
+      shellCmd = 'sh';
+      shellArgs = ['-c', tool.installScript.unix];
     }
   } else {
-    if (tool.id === 'antigravity') {
-      const localStatus = await checkLocalVersion(tool);
-      if (localStatus.installed) {
-        shellCmd = 'sh';
-        shellArgs = ['-c', 'agy update'];
-      } else {
-        shellCmd = 'sh';
-        shellArgs = ['-c', 'curl -sSL https://antigravity.google/cli/install.sh | bash'];
-      }
-    } else if (tool.id === 'atomcode') {
-      shellCmd = 'sh';
-      shellArgs = ['-c', 'curl -fsSL https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/install.sh | sh'];
-    } else if (tool.id === 'qoder') {
-      shellCmd = 'sh';
-      shellArgs = ['-c', 'curl -fsSL https://qoder.com/install | bash'];
-    } else if (tool.id === 'qoder_cn') {
-      shellCmd = 'sh';
-      shellArgs = ['-c', 'curl -fsSL https://qoder.com.cn/install | bash'];
-    } else if (tool.id === 'grok') {
-      shellCmd = 'sh';
-      shellArgs = ['-c', 'curl -fsSL https://x.ai/cli/install | bash'];
+    // ===== npm 安装类工具 =====
+    if (isWin) {
+      shellCmd = 'cmd.exe';
+      shellArgs = ['/c', tool.updateCmd];
     } else {
       shellCmd = 'sh';
       shellArgs = ['-c', tool.updateCmd];
@@ -1183,11 +1216,23 @@ async function doUninstall(toolId) {
 // 获取工具配置（内置 + 自定义，带当前镜像源生成的 updateCmd）
 ipcMain.handle('get-tools', () => getAllTools());
 
-// 批量检测所有工具版本（并行执行）
+// 批量检测所有工具版本（并行执行，流式推送）
+// 每检测完一个工具立即通过 'tool-checked' 事件推送到渲染进程，
+// 实现卡片逐张亮起的流式效果，而非全部完成后一次性刷新
 ipcMain.handle('check-versions', async () => {
   refreshProcessPath();
   const tools = getAllTools();
-  return Promise.all(tools.map(checkTool));
+  const results = await Promise.all(
+    tools.map(async (t) => {
+      const result = await checkTool(t);
+      // 每完成一个立即推送（流式）
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('tool-checked', result);
+      }
+      return result;
+    })
+  );
+  return results;
 });
 
 // 检测单个工具版本
@@ -1532,6 +1577,15 @@ ipcMain.handle('install-agyyolo', async () => {
  * - macOS：打开 Terminal（通过 osascript）
  * - Linux：打开 x-terminal-emulator
  */
+// ===== 高亮指定工具卡片 IPC =====
+// 渲染进程可以通过此通道请求高亮某个工具（如系统通知点击后）
+ipcMain.handle('highlight-tool', (event, toolId) => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('highlight-tool', toolId);
+  }
+  return { success: true };
+});
+
 ipcMain.handle('open-powershell', async () => {
   const isWin = os.platform() === 'win32';
   const { spawn } = require('child_process');
@@ -1573,5 +1627,30 @@ ipcMain.handle('open-powershell', async () => {
         return { success: false, error: err.message };
       }
     }
+  }
+});
+
+// ===== 镜像源测速 IPC =====
+// 向指定镜像源发送 HTTP HEAD 请求并测量响应时间（毫秒）
+ipcMain.handle('ping-registry', async (event, url) => {
+  if (!isValidRegistryUrl(url)) {
+    return { success: false, message: '无效的镜像源 URL' };
+  }
+  const pingUrl = url.trim().replace(/\/$/, '') + '/';
+  const start = Date.now();
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    const res = await fetch(pingUrl, {
+      method: 'HEAD',
+      signal: controller.signal,
+      headers: { 'User-Agent': 'npm-registry-ping' }
+    });
+    clearTimeout(timeout);
+    const ms = Date.now() - start;
+    return { success: true, ms, status: res.status };
+  } catch (err) {
+    const ms = Date.now() - start;
+    return { success: false, ms, message: err.name === 'AbortError' ? '请求超时（>8s）' : err.message };
   }
 });
