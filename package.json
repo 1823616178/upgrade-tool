@@ -7,6 +7,7 @@
     "start": "electron . --disable-gpu-shader-disk-cache",
     "build": "electron-builder",
     "build:win": "electron-builder --win",
+    "build:mac": "electron-builder --mac",
     "icons": "node scripts/generate-icons.js",
     "postinstall": "electron-builder install-app-deps"
   },
@@ -21,6 +22,7 @@
   "author": "",
   "license": "MIT",
   "devDependencies": {
+    "@fiahfy/icns": "^0.0.7",
     "electron": "^31.0.0",
     "electron-builder": "^24.13.3",
     "png-to-ico": "^3.0.1",
@@ -40,8 +42,43 @@
       "script.js",
       "package.json",
       "build/icon.ico",
+      "build/icon.icns",
       "build/icon.png"
     ],
+    "mac": {
+      "icon": "build/icon.icns",
+      "category": "public.app-category.developer-tools",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ]
+    },
+    "dmg": {
+      "contents": [
+        {
+          "x": 130,
+          "y": 220
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
+    },
     "win": {
       "icon": "build/icon.ico",
       "target": [
