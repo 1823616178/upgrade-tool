@@ -1084,9 +1084,25 @@ async function doInstallOrUpdate(toolId) {
   }
 
   return new Promise((resolve, reject) => {
-    const child = spawn(shellCmd, shellArgs, {
-      env: childEnv
-    });
+    let child;
+    try {
+      child = spawn(shellCmd, shellArgs, {
+        env: childEnv,
+        // Windows 上避免继承父进程的安全描述符，减少 EPERM 概率
+        windowsHide: true,
+        // 不创建新进程组，避免某些安全软件拦截
+        detached: false
+      });
+    } catch (spawnErr) {
+      // spawn 同步抛出的错误（如 EPERM）
+      const isPermError = spawnErr.code === 'EPERM' || spawnErr.code === 'EACCES';
+      const msg = isPermError
+        ? `权限不足，无法启动安装进程。${isWin ? '请尝试以管理员身份运行本应用，或检查杀毒软件是否拦截了子进程创建。' : '请检查执行权限。'}`
+        : `启动安装进程失败: ${spawnErr.message}`;
+      sendLog('error', tool.id, msg);
+      resolve({ success: false, message: msg });
+      return;
+    }
 
     // 安装/更新超时保护（5 分钟），防止子进程挂起导致 UI 锁死
     let settled = false;
@@ -1094,7 +1110,7 @@ async function doInstallOrUpdate(toolId) {
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
-      child.kill();
+      try { child.kill(); } catch { /* ignore */ }
       sendLog('error', tool.id, `操作超时（${INSTALL_TIMEOUT / 1000}s），已终止子进程`);
       resolve({ success: false, message: '操作超时' });
     }, INSTALL_TIMEOUT);
@@ -1115,8 +1131,12 @@ async function doInstallOrUpdate(toolId) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      sendLog('error', tool.id, `操作失败: ${err.message}`);
-      reject(err);
+      const isPermError = err.code === 'EPERM' || err.code === 'EACCES';
+      const msg = isPermError
+        ? `权限被拒绝: ${err.message}。${isWin ? 'Windows 上全局安装 npm 包可能需要管理员权限，请尝试右键以管理员身份运行本应用。' : ''}`
+        : `操作失败: ${err.message}`;
+      sendLog('error', tool.id, msg);
+      resolve({ success: false, message: msg });
     });
 
     child.on('close', (code) => {
@@ -1170,16 +1190,29 @@ async function doUninstall(toolId) {
   const shellArgs = isWin ? ['/c', uninstallCmd] : ['-c', uninstallCmd];
 
   return new Promise((resolve, reject) => {
-    const child = spawn(shellCmd, shellArgs, {
-      env: { ...process.env, NPM_CONFIG_REGISTRY: currentRegistry }
-    });
+    let child;
+    try {
+      child = spawn(shellCmd, shellArgs, {
+        env: { ...process.env, NPM_CONFIG_REGISTRY: currentRegistry },
+        windowsHide: true,
+        detached: false
+      });
+    } catch (spawnErr) {
+      const isPermError = spawnErr.code === 'EPERM' || spawnErr.code === 'EACCES';
+      const msg = isPermError
+        ? `权限不足，无法启动卸载进程。${isWin ? '请尝试以管理员身份运行本应用。' : '请检查执行权限。'}`
+        : `启动卸载进程失败: ${spawnErr.message}`;
+      sendLog('error', tool.id, msg);
+      resolve({ success: false, message: msg });
+      return;
+    }
 
     let settled = false;
     const UNINSTALL_TIMEOUT = 5 * 60 * 1000;
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
-      child.kill();
+      try { child.kill(); } catch { /* ignore */ }
       sendLog('error', tool.id, `卸载超时（${UNINSTALL_TIMEOUT / 1000}s），已终止子进程`);
       resolve({ success: false, message: '卸载超时' });
     }, UNINSTALL_TIMEOUT);
@@ -1191,8 +1224,12 @@ async function doUninstall(toolId) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      sendLog('error', tool.id, `卸载失败: ${err.message}`);
-      reject(err);
+      const isPermError = err.code === 'EPERM' || err.code === 'EACCES';
+      const msg = isPermError
+        ? `权限被拒绝: ${err.message}。${isWin ? '请尝试以管理员身份运行本应用。' : ''}`
+        : `卸载失败: ${err.message}`;
+      sendLog('error', tool.id, msg);
+      resolve({ success: false, message: msg });
     });
 
     child.on('close', (code) => {
