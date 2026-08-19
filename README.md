@@ -58,8 +58,11 @@ npm run build
 
 ## 技术栈
 
-- [Electron](https://www.electronjs.org/) v31
-- [electron-builder](https://www.electron.build/) v24.13.3
+- [Electron](https://www.electronjs.org/) v43
+- [electron-builder](https://www.electron.build/) v26
+
+> 注：Electron 42 起，`npm install` 不再通过 postinstall 下载 Electron 二进制，
+> 改为首次运行（`npm start`）时动态下载约 100MB，需保证网络可达。
 
 ## License
 

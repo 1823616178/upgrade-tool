@@ -1,6 +1,6 @@
 // ===== Electron 主进程入口 =====
 // 依赖：electron（应用框架）、path/fs（文件操作）、child_process（执行系统命令）、os（系统信息）
-const { app, BrowserWindow, ipcMain, dialog, Tray, Menu, Notification, clipboard } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Tray, Menu, Notification, clipboard, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
@@ -168,8 +168,9 @@ function saveCustomTools(tools) {
 
 /**
  * 获取所有工具（内置 + 自定义），并根据当前镜像源动态生成 updateCmd
- * - 普通 npm 工具：npm install -g <pkg>@latest --registry=<当前镜像源>
- * - antigravity：使用官方安装脚本（Windows 用 PowerShell，其他用 curl|bash）
+ * updateCmd 仅对 npm 安装类工具有意义：npm install -g <pkg>@latest --registry=<当前镜像源>
+ * 脚本安装类工具（有 installScript 的）由 doInstallOrUpdate 直接读 installScript 执行，
+ * 不需要也不应该再拼一份 updateCmd —— 两份副本容易漂移（例如 atomcode 的 taskkill/PATH 逻辑）
  * @returns {object[]} 合并后的工具列表，每个工具附带 isCustom 和 updateCmd 字段
  */
 function getAllTools() {
@@ -178,50 +179,15 @@ function getAllTools() {
     ...BUILTIN_TOOLS.map(t => ({ ...t, isCustom: false })),
     ...custom.map(t => ({ ...t, isCustom: true }))
   ];
-  return all.map(t => {
-    let updateCmd = '';
-    if (t.id === 'antigravity') {
-      // antigravity 使用独立安装脚本，不走 npm
-      if (os.platform() === 'win32') {
-        updateCmd = 'powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://antigravity.google/cli/install.ps1 | iex"';
-      } else {
-        updateCmd = 'curl -sSL https://antigravity.google/cli/install.sh | bash';
-      }
-    } else if (t.id === 'atomcode') {
-      if (os.platform() === 'win32') {
-        updateCmd = 'powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/install.ps1 | iex"';
-      } else {
-        updateCmd = 'curl -fsSL https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/install.sh | sh';
-      }
-    } else if (t.id === 'qoder') {
-      if (os.platform() === 'win32') {
-        updateCmd = 'powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://qoder.com/install.ps1 | iex"';
-      } else {
-        updateCmd = 'curl -fsSL https://qoder.com/install | bash';
-      }
-    } else if (t.id === 'qoder_cn') {
-      if (os.platform() === 'win32') {
-        updateCmd = 'powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://qoder.com.cn/install.ps1 | iex"';
-      } else {
-        updateCmd = 'curl -fsSL https://qoder.com.cn/install | bash';
-      }
-    } else if (t.id === 'grok') {
-      if (os.platform() === 'win32') {
-        updateCmd = 'powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://x.ai/cli/install.ps1 | iex"';
-      } else {
-        updateCmd = 'curl -fsSL https://x.ai/cli/install | bash';
-      }
-    } else if (t.pkg) {
-      // 普通 npm 全局安装命令，镜像源从当前配置动态拼接
-      updateCmd = `npm install -g ${t.pkg}@latest --registry=${currentRegistry}`;
-    }
-    return {
-      ...t,
-      updateCmd,
-      // 脚本安装工具附带官网链接（渲染层 changelog 入口）；npm 工具由渲染层用 pkg 拼 npmjs 链接
-      docsUrl: SCRIPT_INSTALLED_TOOLS[t.id] ? SCRIPT_INSTALLED_TOOLS[t.id].docsUrl : null
-    };
-  });
+  return all.map(t => ({
+    ...t,
+    // 脚本安装类工具走 installScript，updateCmd 留空
+    updateCmd: (!t.installScript && t.pkg)
+      ? `npm install -g ${t.pkg}@latest --registry=${currentRegistry}`
+      : '',
+    // 脚本安装工具附带官网链接（渲染层 changelog 入口）；npm 工具由渲染层用 pkg 拼 npmjs 链接
+    docsUrl: SCRIPT_INSTALLED_TOOLS[t.id] ? SCRIPT_INSTALLED_TOOLS[t.id].docsUrl : null
+  }));
 }
 
 // ===== 全局状态变量 =====
@@ -257,6 +223,20 @@ function createWindow() {
   Menu.setApplicationMenu(null);
 
   mainWindow.loadFile(path.join(__dirname, 'index.html'));
+
+  // 安全加固：本应用是纯本地页面，不应发生任何页内导航或新开窗口。
+  // 外链一律交给系统浏览器（且只放行 http/https），防止渲染进程被导航到外部页面。
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url)) shell.openExternal(url);
+    return { action: 'deny' };
+  });
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (url !== mainWindow.webContents.getURL()) {
+      event.preventDefault();
+      if (/^https?:\/\//i.test(url)) shell.openExternal(url);
+    }
+  });
+
 
   // 页面加载完成后显示窗口
   mainWindow.once('ready-to-show', () => {
@@ -506,9 +486,9 @@ function execCommand(command, args = [], options = {}) {
     let child;
     if (isWin && options.shell) {
       // Windows 下通过 cmd.exe 执行，支持 .bat/.cmd 等
-      child = spawn('cmd.exe', ['/c', command, ...args], { env: process.env });
+      child = spawn('cmd.exe', ['/c', command, ...args], { env: process.env, windowsHide: true });
     } else {
-      child = spawn(command, args, { env: process.env, shell: options.shell || false });
+      child = spawn(command, args, { env: process.env, shell: options.shell || false, windowsHide: true });
     }
 
     let stdout = '';
@@ -678,53 +658,88 @@ function isValidCliCommand(cmd) {
   return /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(cmd);
 }
 
+// PATH 刷新结果缓存有效期：注册表 PATH 只会在安装/卸载后变化，
+// 短时间内的重复刷新（如「一键更新全部」逐个工具触发）直接复用缓存
+const PATH_CACHE_TTL = 30 * 1000;
+let _pathRefreshedAt = 0;      // 上次成功刷新的时间戳
+let _pathRefreshInflight = null; // 正在进行中的刷新 Promise（并发去重）
+
+// Windows 下一次性读出 Machine + User 两段 PATH，用不会出现在路径中的标记分隔
+const PATH_SPLIT_MARKER = '<<<PATHSPLIT>>>';
+const READ_PATH_PS = [
+  "[Environment]::GetEnvironmentVariable('Path','Machine')",
+  `'${PATH_SPLIT_MARKER}'`,
+  "[Environment]::GetEnvironmentVariable('Path','User')"
+].join('; ');
+
 /**
  * 从系统重新读取 PATH 并写入当前进程（安装后可立即检测到新命令）
+ *
+ * 相比早期实现的改动：
+ * - Windows 上由两次 execSync 合并为一次异步 PowerShell 调用，不再阻塞主进程事件循环
+ * - 加入 TTL 缓存与并发去重，避免「一键更新全部」时每个工具重复拉起 PowerShell
+ *
+ * @param {object} [options] - { force } 强制忽略缓存（安装/卸载后应传 true）
+ * @returns {Promise<void>} 刷新失败不抛出，静默忽略
  */
-function refreshProcessPath() {
-  try {
-    if (os.platform() === 'win32') {
-      const { execSync } = require('child_process');
-      const ps = 'powershell.exe';
-      const userPath = execSync(
-        `${ps} -NoProfile -Command "[Environment]::GetEnvironmentVariable('Path','User')"`,
-        { encoding: 'utf-8', timeout: 8000, windowsHide: true }
-      ).trim();
-      const machinePath = execSync(
-        `${ps} -NoProfile -Command "[Environment]::GetEnvironmentVariable('Path','Machine')"`,
-        { encoding: 'utf-8', timeout: 8000, windowsHide: true }
-      ).trim();
-      const registryParts = [machinePath, userPath]
-        .filter(Boolean)
-        .join(';')
-        .split(';')
-        .filter(Boolean);
-      if (registryParts.length) {
-        // 合并而非覆盖：注册表 PATH 在前，保留当前进程继承的额外条目（如便携运行时注入的路径）
-        const currentParts = (process.env.Path || process.env.PATH || '').split(';').filter(Boolean);
-        const seen = new Set(registryParts.map(p => p.toLowerCase()));
-        const extras = currentParts.filter(p => !seen.has(p.toLowerCase()));
-        const merged = [...registryParts, ...extras].join(';');
-        process.env.Path = merged;
+function refreshProcessPath(options = {}) {
+  // 命中缓存：直接返回，不启动子进程
+  if (!options.force && Date.now() - _pathRefreshedAt < PATH_CACHE_TTL) {
+    return Promise.resolve();
+  }
+  // 已有刷新在途：复用同一个 Promise，避免并发重复拉起 PowerShell
+  if (_pathRefreshInflight) return _pathRefreshInflight;
+
+  _pathRefreshInflight = (async () => {
+    try {
+      if (os.platform() === 'win32') {
+        const output = await execCommand(
+          'powershell.exe',
+          ['-NoProfile', '-NonInteractive', '-Command', READ_PATH_PS],
+          { shell: false, timeout: 8000 }
+        );
+        const [machinePath = '', userPath = ''] = output.split(PATH_SPLIT_MARKER);
+        // 去掉段内换行：PATH 里不会有换行，而 PowerShell 在窄输出宽度下可能把超长字符串折行，
+        // 直接剔除换行即可还原原串（比 trim 更稳）
+        const stripBreaks = (v) => v.replace(/[\r\n]+/g, '').trim();
+        const registryParts = [stripBreaks(machinePath), stripBreaks(userPath)]
+          .filter(Boolean)
+          .join(';')
+          .split(';')
+          .map(p => p.trim())
+          .filter(Boolean);
+        if (registryParts.length) {
+          // 合并而非覆盖：注册表 PATH 在前，保留当前进程继承的额外条目（如便携运行时注入的路径）
+          const currentParts = (process.env.Path || process.env.PATH || '').split(';').filter(Boolean);
+          const seen = new Set(registryParts.map(p => p.toLowerCase()));
+          const extras = currentParts.filter(p => !seen.has(p.toLowerCase()));
+          const merged = [...registryParts, ...extras].join(';');
+          process.env.Path = merged;
+          process.env.PATH = merged;
+        }
+      } else {
+        // Unix: 合并常见用户路径
+        const home = os.homedir();
+        const extras = [
+          path.join(home, '.local', 'bin'),
+          path.join(home, '.npm-global', 'bin'),
+          '/usr/local/bin'
+        ];
+        const current = process.env.PATH || '';
+        const merged = [...extras.filter(p => fs.existsSync(p) && !current.includes(p)), current]
+          .filter(Boolean)
+          .join(path.delimiter);
         process.env.PATH = merged;
       }
-    } else {
-      // Unix: 合并常见用户路径
-      const home = os.homedir();
-      const extras = [
-        path.join(home, '.local', 'bin'),
-        path.join(home, '.npm-global', 'bin'),
-        '/usr/local/bin'
-      ];
-      const current = process.env.PATH || '';
-      const merged = [...extras.filter(p => fs.existsSync(p) && !current.includes(p)), current]
-        .filter(Boolean)
-        .join(path.delimiter);
-      process.env.PATH = merged;
+      _pathRefreshedAt = Date.now();
+    } catch {
+      // PATH 刷新失败不阻断主流程（也不更新时间戳，下次仍会重试）
+    } finally {
+      _pathRefreshInflight = null;
     }
-  } catch {
-    // PATH 刷新失败不阻断主流程
-  }
+  })();
+
+  return _pathRefreshInflight;
 }
 
 /**
@@ -941,19 +956,56 @@ async function checkLatestVersion(tool) {
     return { latest: null, error: (lastErr && lastErr.message) || 'grok channel 版本获取失败' };
   }
 
-  // 普通 npm 工具：查询 registry 最新版本（失败时自动重试 1 次）
+  // 普通 npm 工具：优先走 registry HTTP 接口（毫秒级），失败再回退到 npm view 子进程
+  const viaHttp = await fetchLatestFromRegistry(tool.pkg);
+  if (viaHttp.latest) return viaHttp;
+
+  // HTTP 失败（私有源不支持 /latest、需要认证、网络异常等）：回退到 npm CLI，仍保留 1 次重试
+  let lastErr = viaHttp.error;
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
       const output = await execCommand('npm', ['view', tool.pkg, 'version', `--registry=${currentRegistry}`], { shell: true });
       return { latest: output.trim() };
     } catch (err) {
+      lastErr = err.message;
       if (attempt < 2) {
         // 等待 2 秒后重试（网络抖动场景）
         await new Promise(r => setTimeout(r, 2000));
-      } else {
-        return { latest: null, error: err.message };
       }
     }
+  }
+  return { latest: null, error: lastErr };
+}
+
+// registry HTTP 查询超时（毫秒）——远快于 npm view 子进程冷启动，超时也就回退
+const REGISTRY_HTTP_TIMEOUT = 6000;
+
+/**
+ * 直接向 npm registry 查询包的最新版本
+ * 相比 `npm view` 省掉一次 Node 进程冷启动（约 1-3s → 几十 ms），且不占用子进程
+ * @param {string} pkg - npm 包名（调用前已由 isValidNpmPackage 校验）
+ * @returns {Promise<{latest: string|null, error?: string}>}
+ */
+async function fetchLatestFromRegistry(pkg) {
+  if (!pkg) return { latest: null, error: '缺少包名' };
+  const base = currentRegistry.endsWith('/') ? currentRegistry : `${currentRegistry}/`;
+  // scope 中的 / 需要保留原样，npmjs / npmmirror 均支持 /@scope/name/latest
+  const url = `${base}${pkg}/latest`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REGISTRY_HTTP_TIMEOUT);
+  try {
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: { 'Accept': 'application/vnd.npm.install-v1+json, application/json' }
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (!data || !data.version) throw new Error('响应中无 version 字段');
+    return { latest: String(data.version).trim() };
+  } catch (err) {
+    return { latest: null, error: err.name === 'AbortError' ? 'registry 查询超时' : err.message };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -1257,7 +1309,8 @@ ipcMain.handle('get-tools', () => getAllTools());
 // 每检测完一个工具立即通过 'tool-checked' 事件推送到渲染进程，
 // 实现卡片逐张亮起的流式效果，而非全部完成后一次性刷新
 ipcMain.handle('check-versions', async () => {
-  refreshProcessPath();
+  // 检测前刷新 PATH（命中 TTL 缓存时不会拉起子进程）
+  await refreshProcessPath();
   const tools = getAllTools();
   const results = await Promise.all(
     tools.map(async (t) => {
@@ -1274,7 +1327,7 @@ ipcMain.handle('check-versions', async () => {
 
 // 检测单个工具版本
 ipcMain.handle('check-version', async (event, toolId) => {
-  refreshProcessPath();
+  await refreshProcessPath();
   const tools = getAllTools();
   const tool = tools.find(t => t.id === toolId);
   if (!tool) throw new Error('未知工具');
@@ -1284,21 +1337,23 @@ ipcMain.handle('check-version', async (event, toolId) => {
 // 更新单个工具
 ipcMain.handle('update-tool', async (event, toolId) => {
   const result = await doInstallOrUpdate(toolId);
-  refreshProcessPath();
+  // 安装/更新可能写入了新的 PATH 条目，强制刷新（绕过 TTL 缓存）
+  await refreshProcessPath({ force: true });
   return result;
 });
 
 // 安装单个工具（逻辑与更新相同，npm install -g 同时适用于首次安装和升级）
 ipcMain.handle('install-tool', async (event, toolId) => {
   const result = await doInstallOrUpdate(toolId);
-  refreshProcessPath();
+  // 安装/更新可能写入了新的 PATH 条目，强制刷新（绕过 TTL 缓存）
+  await refreshProcessPath({ force: true });
   return result;
 });
 
 // 卸载单个工具
 ipcMain.handle('uninstall-tool', async (event, toolId) => {
   const result = await doUninstall(toolId);
-  refreshProcessPath();
+  await refreshProcessPath({ force: true });
   return result;
 });
 
@@ -1478,7 +1533,6 @@ ipcMain.handle('open-external', async (event, url) => {
     sendLog('error', 'system', `拒绝打开链接: ${err.message}`);
     return { success: false, message: err.message };
   }
-  const { shell } = require('electron');
   await shell.openExternal(url);
   return { success: true };
 });
@@ -1614,18 +1668,8 @@ ipcMain.handle('install-agyyolo', async () => {
  * - macOS：打开 Terminal（通过 osascript）
  * - Linux：打开 x-terminal-emulator
  */
-// ===== 高亮指定工具卡片 IPC =====
-// 渲染进程可以通过此通道请求高亮某个工具（如系统通知点击后）
-ipcMain.handle('highlight-tool', (event, toolId) => {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('highlight-tool', toolId);
-  }
-  return { success: true };
-});
-
 ipcMain.handle('open-powershell', async () => {
   const isWin = os.platform() === 'win32';
-  const { spawn } = require('child_process');
 
   if (isWin) {
     try {

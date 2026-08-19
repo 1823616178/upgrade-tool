@@ -9,6 +9,7 @@
     "build:win": "electron-builder --win",
     "build:mac": "electron-builder --mac",
     "icons": "node scripts/generate-icons.js",
+    "test": "node scripts/verify-semver.js",
     "postinstall": "electron-builder install-app-deps"
   },
   "keywords": [
@@ -23,9 +24,9 @@
   "license": "MIT",
   "devDependencies": {
     "@fiahfy/icns": "^0.0.7",
-    "electron": "^31.0.0",
-    "electron-builder": "^24.13.3",
-    "png-to-ico": "^3.0.1",
+    "electron": "^43.4.0",
+    "electron-builder": "^26.15.3",
+    "png-to-ico": "^3.0.2",
     "sharp": "^0.35.3"
   },
   "build": {
@@ -95,7 +96,9 @@
           ]
         }
       ],
-      "publisherName": "AI Code Tool Updater"
+      "signtoolOptions": {
+        "publisherName": "AI Code Tool Updater"
+      }
     },
     "nsis": {
       "oneClick": false,

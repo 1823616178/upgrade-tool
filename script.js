@@ -15,6 +15,8 @@ let statsFilter = null;
 const MAX_LOG_ENTRIES = 2000; // 上限，防止长时间运行内存无限增长
 const logEntries = [];
 const logFilters = { level: '', tool: '', keyword: '' };
+/** 当前实际渲染到 DOM 的日志条数（增量渲染需要它来维护空状态与截断） */
+let visibleLogCount = 0;
 
 // ===== DOM 元素 =====
 const toolsGrid = document.getElementById('tools-grid');
@@ -107,7 +109,25 @@ function bindEvents() {
   btnExportLog.addEventListener('click', exportLog);
   btnAddTool.addEventListener('click', openModal);
   btnSettings.addEventListener('click', openSettings);
+  // 镜像源测速：必须用 addEventListener 绑定，
+  // 页面 CSP 为 script-src 'self'（无 unsafe-inline），HTML 内联 onclick 会被直接拦截
+  const btnPingRegistry = document.getElementById('btn-ping-registry');
+  if (btnPingRegistry) btnPingRegistry.addEventListener('click', pingAllRegistries);
   btnDismissEnv.addEventListener('click', () => { envBanner.style.display = 'none'; });
+
+  // 工具卡片按钮：事件委托绑定一次，卡片重渲染/局部替换后都无需重新绑定
+  // （disabled 的按钮不会派发 click，操作锁仍然有效）
+  toolsGrid.addEventListener('click', (e) => {
+    const btn = e.target.closest('button');
+    if (!btn) return;
+    if (btn.classList.contains('btn-update'))          updateTool(btn.dataset.id);
+    else if (btn.classList.contains('btn-install'))    installTool(btn.dataset.id);
+    else if (btn.classList.contains('btn-uninstall'))  uninstallTool(btn.dataset.id);
+    else if (btn.classList.contains('btn-remove'))     removeCustomTool(btn.dataset.id);
+    else if (btn.classList.contains('changelog-link') && btn.dataset.url) {
+      window.electronAPI.openExternal(btn.dataset.url);
+    }
+  });
 
   // 镜像源切换（含自定义源弹窗）
   selectRegistry.addEventListener('change', onRegistryChange);
@@ -384,7 +404,11 @@ function renderSkeleton(tools) {
   for (const tool of tools) {
     const card = document.createElement('div');
     card.className = 'tool-card';
+    // data-id 必须写上：流式检测结果回来时 updateSingleCard 靠它定位卡片，
+    // 缺了会导致每个结果都退化成全量 renderTools()，骨架屏当场塌缩成一张卡
+    card.dataset.id = tool.id;
     card.innerHTML = `
+      <div class="card-progress"></div>
       <div class="tool-card-body">
         <div class="tool-header">
           <h3 class="tool-name">${escapeHtml(tool.name)}</h3>
@@ -435,6 +459,46 @@ function classifyTool(tool) {
   return { rank: 1, statusClass: 'status-not-installed', statusText: '未安装', canUpdate: false, canInstall: true, stat: 'install', cardClass: 'card-not-installed' };
 }
 
+/**
+ * 构建卡片操作区（.tool-actions）的 HTML
+ * renderTools（全量渲染）与 updateSingleCard（流式局部更新）共用，
+ * 避免两处各写一份模板导致长期漂移
+ * @param {object} tool - 工具数据
+ * @param {object} cls  - classifyTool(tool) 的结果
+ * @returns {string} 操作区内部 HTML
+ */
+function buildActionsHtml(tool, cls) {
+  const id = escapeHtml(tool.id);
+  const locked = updatingTools.has(tool.id) ? 'disabled' : '';
+
+  let actionBtn;
+  if (cls.canUpdate) {
+    actionBtn = `<button class="btn btn-primary btn-update btn-sm" data-id="${id}" ${locked}>更新</button>`;
+  } else if (cls.canInstall) {
+    actionBtn = `<button class="btn btn-success btn-install btn-sm" data-id="${id}" ${locked}>安装</button>`;
+  } else {
+    actionBtn = `<button class="btn btn-primary btn-sm" disabled>已是最新</button>`;
+  }
+
+  // 已安装的工具附加卸载按钮
+  const uninstallBtn = tool.installed
+    ? `<button class="btn btn-danger-ghost btn-uninstall btn-sm" data-id="${id}" ${locked}>卸载</button>`
+    : '';
+
+  // changelog 入口：脚本安装工具用官网，npm 工具指向 npmjs 包页
+  const changelogUrl = tool.docsUrl || (tool.pkg ? `https://www.npmjs.com/package/${tool.pkg}` : '');
+  const changelogLink = changelogUrl
+    ? `<button class="btn btn-ghost btn-sm changelog-link" data-url="${escapeHtml(changelogUrl)}" title="查看 ${escapeHtml(tool.name)} 更新说明" type="button">🔗</button>`
+    : '';
+
+  // 自定义工具附加删除按钮
+  const removeBtn = tool.isCustom
+    ? `<button class="btn btn-danger-ghost btn-remove btn-sm" data-id="${id}" title="移除此自定义工具">🗑️</button>`
+    : '';
+
+  return actionBtn + uninstallBtn + changelogLink + removeBtn;
+}
+
 // ===== 渲染工具卡片 =====
 function renderTools() {
   toolsGrid.innerHTML = '';
@@ -459,39 +523,11 @@ function renderTools() {
     card.className = `tool-card ${cls.cardClass}`;
     card.dataset.id = tool.id;
 
-    // 动作按钮：更新 / 安装 / 禁用
-    let actionBtn = '';
-    if (cls.canUpdate) {
-      actionBtn = `<button class="btn btn-primary btn-update btn-sm" data-id="${escapeHtml(tool.id)}" ${updatingTools.has(tool.id) ? 'disabled' : ''}>更新</button>`;
-    } else if (cls.canInstall) {
-      actionBtn = `<button class="btn btn-success btn-install btn-sm" data-id="${escapeHtml(tool.id)}" ${updatingTools.has(tool.id) ? 'disabled' : ''}>安装</button>`;
-    } else {
-      actionBtn = `<button class="btn btn-primary btn-sm" disabled>已是最新</button>`;
-    }
-
-    // 已安装的工具附加卸载按钮
-    let uninstallBtn = '';
-    if (tool.installed) {
-      uninstallBtn = `<button class="btn btn-danger-ghost btn-uninstall btn-sm" data-id="${escapeHtml(tool.id)}" ${updatingTools.has(tool.id) ? 'disabled' : ''}>卸载</button>`;
-    }
-
-    // 自定义工具附加删除按钮
-    let removeBtn = '';
-    if (tool.isCustom) {
-      removeBtn = `<button class="btn btn-danger-ghost btn-remove btn-sm" data-id="${escapeHtml(tool.id)}" title="移除此自定义工具">🗑️</button>`;
-    }
-
     // 自定义工具标识
     const customBadge = tool.isCustom ? '<span class="custom-badge">自定义</span>' : '';
 
     // 可更新时"最新"版本号高亮
     const latestClass = cls.canUpdate ? 'version-value version-highlight' : 'version-value';
-
-    // changelog 入口：脚本安装工具用官网，npm 工具指向 npmjs 包页
-    const changelogUrl = tool.docsUrl || (tool.pkg ? `https://www.npmjs.com/package/${tool.pkg}` : '');
-    const changelogLink = changelogUrl
-      ? `<button class="btn btn-ghost btn-sm changelog-link" data-url="${escapeHtml(changelogUrl)}" title="查看 ${escapeHtml(tool.name)} 更新说明" type="button">🔗</button>`
-      : '';
 
     card.innerHTML = `
       <div class="card-progress"></div>
@@ -512,12 +548,7 @@ function renderTools() {
           </div>
         </div>
       </div>
-      <div class="tool-actions">
-        ${actionBtn}
-        ${uninstallBtn}
-        ${changelogLink}
-        ${removeBtn}
-      </div>
+      <div class="tool-actions">${buildActionsHtml(tool, cls)}</div>
     `;
 
     toolsGrid.appendChild(card);
@@ -525,45 +556,7 @@ function renderTools() {
     card.style.animationDelay = `${cardIdx * 30}ms`;
   }
 
-  // 绑定更新按钮
-  document.querySelectorAll('.btn-update').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      const id = e.currentTarget.dataset.id;
-      updateTool(id);
-    });
-  });
-
-  // 绑定安装按钮
-  document.querySelectorAll('.btn-install').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      const id = e.currentTarget.dataset.id;
-      installTool(id);
-    });
-  });
-
-  // 绑定卸载按钮
-  document.querySelectorAll('.btn-uninstall').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      const id = e.currentTarget.dataset.id;
-      uninstallTool(id);
-    });
-  });
-
-  // 绑定删除按钮
-  document.querySelectorAll('.btn-remove').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      const id = e.currentTarget.dataset.id;
-      removeCustomTool(id);
-    });
-  });
-
-  // 绑定 changelog 链接
-  document.querySelectorAll('.changelog-link').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      const url = e.currentTarget.dataset.url;
-      if (url) window.electronAPI.openExternal(url);
-    });
-  });
+  // 卡片按钮通过 toolsGrid 上的事件委托统一处理（见 bindEvents），此处无需逐个绑定
 
   btnUpdateAll.disabled = updateCount === 0 || updatingTools.size > 0;
   // 当有未安装工具且不在更新状态时，启用一键安装
@@ -811,7 +804,9 @@ async function updateAll() {
   } finally {
     btnUpdateAll.innerHTML = '<span class="icon">🚀</span> 一键更新全部';
     updateUIState(false);
-    await silentRefreshAll();
+    // 循环中每个工具都已经 refreshSingleTool 过了，这里只需重排/重绘，
+    // 不必再对全部工具（含没动过的）跑一次完整检测
+    renderTools();
   }
 }
 
@@ -844,7 +839,9 @@ async function installAll() {
   } finally {
     btnInstallAll.innerHTML = '<span class="icon">📦</span> 一键安装全部';
     updateUIState(false);
-    await silentRefreshAll();
+    // 循环中每个工具都已经 refreshSingleTool 过了，这里只需重排/重绘，
+    // 不必再对全部工具（含没动过的）跑一次完整检测
+    renderTools();
   }
 }
 
@@ -859,16 +856,6 @@ async function refreshSingleTool(toolId) {
     renderTools();
   } catch (err) {
     appendLog('error', toolId, `刷新版本失败: ${err.message}`);
-  }
-}
-
-// 静默刷新所有工具版本（不清空日志）
-async function silentRefreshAll() {
-  try {
-    toolsData = await window.electronAPI.checkVersions();
-    renderTools();
-  } catch (err) {
-    appendLog('error', 'system', `刷新版本失败: ${err.message}`);
   }
 }
 
@@ -908,37 +895,96 @@ function clearLog() {
   renderLogs();
 }
 
+/**
+ * 追加日志（增量渲染）
+ *
+ * 早期实现每来一条日志就整体重建全部条目（上限 2000）的 DOM，安装时 npm 的流式输出
+ * 会把它变成 O(n^2) —— 界面明显卡顿。这里改为只为新增行创建节点并 append，
+ * 只有过滤条件变化或清空时才走 renderLogs() 全量重建。
+ */
 function appendLog(type, toolId, message, time) {
   if (!message || message.trim() === '') return;
 
+  const stamp = time || new Date().toLocaleTimeString();
   const lines = message.split(/\r?\n/).filter(line => line.trim() !== '');
+  if (lines.length === 0) return;
+
+  // 追加前先判断视图是否贴在底部，决定之后要不要自动滚动
+  const stickToBottom = isLogScrolledToBottom();
+
+  const fragment = document.createDocumentFragment();
+  let added = 0;
   for (const line of lines) {
-    logEntries.push({ type, toolId, message: line, time: time || new Date().toLocaleTimeString() });
+    const entry = { type, toolId, message: line, time: stamp };
+    logEntries.push(entry);
+    // 命中当前过滤条件的才进入视图（数据始终保留全量，复制/导出不受影响）
+    if (logMatchesFilters(entry)) {
+      fragment.appendChild(buildLogLine(entry));
+      added++;
+    }
   }
-  // 超出上限从头部截断
+
+  // 超出上限从头部截断（数据与 DOM 同步裁剪）
+  let dropped = 0;
   if (logEntries.length > MAX_LOG_ENTRIES) {
-    logEntries.splice(0, logEntries.length - MAX_LOG_ENTRIES);
+    const removed = logEntries.splice(0, logEntries.length - MAX_LOG_ENTRIES);
+    dropped = removed.filter(logMatchesFilters).length;
   }
-  renderLogs();
+
+  if (added === 0 && dropped === 0) return;
+
+  // 有新内容要显示时，先清掉空状态占位
+  if (visibleLogCount === 0 && added > 0) logContainer.innerHTML = '';
+  for (let i = 0; i < dropped && logContainer.firstChild; i++) {
+    logContainer.removeChild(logContainer.firstChild);
+  }
+  if (added > 0) logContainer.appendChild(fragment);
+  visibleLogCount = visibleLogCount - dropped + added;
+
+  if (visibleLogCount === 0) {
+    renderLogEmptyState();
+    return;
+  }
+  // 只在用户本来就贴着底部时才跟随滚动，否则不打断用户回看历史日志
+  if (stickToBottom) logContainer.scrollTop = logContainer.scrollHeight;
 }
 
-/** 按当前过滤条件渲染日志视图（过滤只影响视图，不改变数据） */
-function renderLogs() {
+/** 单条日志是否命中当前过滤条件 */
+function logMatchesFilters(entry) {
+  if (logFilters.level && entry.type !== logFilters.level) return false;
+  if (logFilters.tool && entry.toolId !== logFilters.tool) return false;
   const keyword = logFilters.keyword.toLowerCase();
+  if (keyword && !entry.message.toLowerCase().includes(keyword)) return false;
+  return true;
+}
+
+/** 日志视图是否已滚动到底部（留 40px 容差） */
+function isLogScrolledToBottom() {
+  return logContainer.scrollHeight - logContainer.scrollTop - logContainer.clientHeight < 40;
+}
+
+/** 渲染空状态占位 */
+function renderLogEmptyState() {
+  logContainer.innerHTML = `<div class="log-empty">${logEntries.length === 0 ? '点击「检测版本」开始' : '没有匹配过滤条件的日志'}</div>`;
+}
+
+/**
+ * 按当前过滤条件全量重建日志视图（过滤只影响视图，不改变数据）
+ * 仅在过滤条件变化或清空日志时调用；正常追加走 appendLog 的增量路径
+ */
+function renderLogs() {
   const fragment = document.createDocumentFragment();
-  let visible = 0;
+  visibleLogCount = 0;
 
   for (const entry of logEntries) {
-    if (logFilters.level && entry.type !== logFilters.level) continue;
-    if (logFilters.tool && entry.toolId !== logFilters.tool) continue;
-    if (keyword && !entry.message.toLowerCase().includes(keyword)) continue;
+    if (!logMatchesFilters(entry)) continue;
     fragment.appendChild(buildLogLine(entry));
-    visible++;
+    visibleLogCount++;
   }
 
   logContainer.innerHTML = '';
-  if (visible === 0) {
-    logContainer.innerHTML = `<div class="log-empty">${logEntries.length === 0 ? '点击「检测版本」开始' : '没有匹配过滤条件的日志'}</div>`;
+  if (visibleLogCount === 0) {
+    renderLogEmptyState();
     return;
   }
   logContainer.appendChild(fragment);
@@ -1066,43 +1112,10 @@ function updateSingleCard(tool) {
   }
 
   // 更新操作按钮区域（局部替换）
+  // 事件由 toolsGrid 上的委托统一处理，替换 innerHTML 后无需重新绑定
   const actionsEl = existing.querySelector('.tool-actions');
   if (actionsEl) {
-    const isLocked = updatingTools.has(tool.id);
-    let actionBtn = '';
-    if (cls.canUpdate) {
-      actionBtn = `<button class="btn btn-primary btn-update btn-sm" data-id="${escapeHtml(tool.id)}" ${isLocked ? 'disabled' : ''}>更新</button>`;
-    } else if (cls.canInstall) {
-      actionBtn = `<button class="btn btn-success btn-install btn-sm" data-id="${escapeHtml(tool.id)}" ${isLocked ? 'disabled' : ''}>安装</button>`;
-    } else {
-      actionBtn = `<button class="btn btn-primary btn-sm" disabled>已是最新</button>`;
-    }
-    const uninstallBtn = tool.installed
-      ? `<button class="btn btn-danger-ghost btn-uninstall btn-sm" data-id="${escapeHtml(tool.id)}" ${isLocked ? 'disabled' : ''}>卸载</button>`
-      : '';
-    const removeBtn = tool.isCustom
-      ? `<button class="btn btn-danger-ghost btn-remove btn-sm" data-id="${escapeHtml(tool.id)}" title="移除此自定义工具">🗑️</button>`
-      : '';
-    const changelogUrl = tool.docsUrl || (tool.pkg ? `https://www.npmjs.com/package/${tool.pkg}` : '');
-    const changelogLink = changelogUrl
-      ? `<button class="btn btn-ghost btn-sm changelog-link" data-url="${escapeHtml(changelogUrl)}" title="查看更新说明" type="button">🔗</button>`
-      : '';
-    actionsEl.innerHTML = actionBtn + uninstallBtn + changelogLink + removeBtn;
-
-    // 重新绑定按钮事件
-    const updBtn = actionsEl.querySelector('.btn-update');
-    if (updBtn) updBtn.addEventListener('click', e => updateTool(e.currentTarget.dataset.id));
-    const instBtn = actionsEl.querySelector('.btn-install');
-    if (instBtn) instBtn.addEventListener('click', e => installTool(e.currentTarget.dataset.id));
-    const uninstBtn = actionsEl.querySelector('.btn-uninstall');
-    if (uninstBtn) uninstBtn.addEventListener('click', e => uninstallTool(e.currentTarget.dataset.id));
-    const rmBtn = actionsEl.querySelector('.btn-remove');
-    if (rmBtn) rmBtn.addEventListener('click', e => removeCustomTool(e.currentTarget.dataset.id));
-    const chgBtn = actionsEl.querySelector('.changelog-link');
-    if (chgBtn) chgBtn.addEventListener('click', e => {
-      const url = e.currentTarget.dataset.url;
-      if (url) window.electronAPI.openExternal(url);
-    });
+    actionsEl.innerHTML = buildActionsHtml(tool, cls);
   }
 
   // 同步顶部按钮状态
