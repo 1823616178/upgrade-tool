@@ -124,6 +124,14 @@ const BUILTIN_TOOLS = [
     },
     docsUrl: 'https://x.ai/'
   },
+  {
+    id: 'muse', name: 'Muse CLI', cmd: 'muse', versionArg: '--version',
+    installScript: {
+      win:  'Write-Host "[Muse] Trying to install via WSL (Windows Subsystem for Linux)..."; wsl -e bash -c "curl -fsSL https://dev.meta.ai/install.sh | bash"',
+      unix: 'curl -fsSL https://dev.meta.ai/install.sh | bash'
+    },
+    docsUrl: 'https://dev.meta.ai/'
+  },
 ];
 
 // 通过官方安装脚本安装的工具（用于判断是否支持自动卸载）
