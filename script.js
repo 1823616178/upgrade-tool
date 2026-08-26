@@ -32,6 +32,7 @@ const btnAddTool = document.getElementById('btn-add-tool');
 const btnSettings = document.getElementById('btn-settings');
 const btnInstallAgyyolo = document.getElementById('btn-install-agyyolo');
 const btnOpenPowerShell = document.getElementById('btn-open-powershell');
+const btnExportReport = document.getElementById('btn-export-report');
 const selectRegistry = document.getElementById('select-registry');
 const envBanner = document.getElementById('env-banner');
 const envBannerText = document.getElementById('env-banner-text');
@@ -61,6 +62,7 @@ const btnSettingsSave = document.getElementById('btn-settings-save');
 const selectBgCheck = document.getElementById('select-bg-check');
 const checkMinimizeTray = document.getElementById('check-minimize-tray');
 const checkOpenAtLogin = document.getElementById('check-open-at-login');
+const checkStartMinimized = document.getElementById('check-start-minimized');
 
 // 自定义镜像源模态框
 const registryOverlay = document.getElementById('registry-overlay');
@@ -104,6 +106,7 @@ function bindEvents() {
   btnAdmin.addEventListener('click', () => window.electronAPI.showAdminTip());
   btnInstallAgyyolo.addEventListener('click', installAgyyolo);
   btnOpenPowerShell.addEventListener('click', openPowerShell);
+  btnExportReport.addEventListener('click', exportVersionReport);
   btnClearLog.addEventListener('click', clearLog);
   btnCopyLog.addEventListener('click', copyLog);
   btnExportLog.addEventListener('click', exportLog);
@@ -113,6 +116,8 @@ function bindEvents() {
   // 页面 CSP 为 script-src 'self'（无 unsafe-inline），HTML 内联 onclick 会被直接拦截
   const btnPingRegistry = document.getElementById('btn-ping-registry');
   if (btnPingRegistry) btnPingRegistry.addEventListener('click', pingAllRegistries);
+  const btnAutoRegistry = document.getElementById('btn-auto-registry');
+  if (btnAutoRegistry) btnAutoRegistry.addEventListener('click', autoSelectFastestRegistry);
   btnDismissEnv.addEventListener('click', () => { envBanner.style.display = 'none'; });
 
   // 工具卡片按钮：事件委托绑定一次，卡片重渲染/局部替换后都无需重新绑定
@@ -336,6 +341,7 @@ async function openSettings() {
     selectBgCheck.value = String(hours);
     checkMinimizeTray.checked = settings.minimizeToTray !== false;
     checkOpenAtLogin.checked = !!settings.openAtLogin;
+    checkStartMinimized.checked = !!settings.startMinimized;
     settingsOverlay.style.display = 'flex';
   } catch (err) {
     appendLog('error', 'system', `加载设置失败: ${err.message}`);
@@ -351,9 +357,10 @@ async function saveSettingsFromUI() {
     const backgroundCheckHours = parseInt(selectBgCheck.value, 10);
     const minimizeToTray = checkMinimizeTray.checked;
     const openAtLogin = checkOpenAtLogin.checked;
-    await window.electronAPI.saveSettings({ backgroundCheckHours, minimizeToTray, openAtLogin });
+    const startMinimized = checkStartMinimized.checked;
+    await window.electronAPI.saveSettings({ backgroundCheckHours, minimizeToTray, openAtLogin, startMinimized });
     closeSettings();
-    appendLog('success', 'system', `设置已保存：后台检测 ${backgroundCheckHours === 0 ? '已关闭' : `每 ${backgroundCheckHours} 小时`}，托盘最小化 ${minimizeToTray ? '开' : '关'}，开机自启 ${openAtLogin ? '开' : '关'}`);
+    appendLog('success', 'system', `设置已保存：后台检测 ${backgroundCheckHours === 0 ? '已关闭' : `每 ${backgroundCheckHours} 小时`}，托盘最小化 ${minimizeToTray ? '开' : '关'}，开机自启 ${openAtLogin ? '开' : '关'}，启动最小化 ${startMinimized ? '开' : '关'}`);
   } catch (err) {
     appendLog('error', 'system', `保存设置失败: ${err.message}`);
   }
@@ -438,6 +445,10 @@ function renderSkeleton(tools) {
 // rank 用于排序：可更新(0) → 未安装/检测失败(1) → 远端检测失败(2) → 本地较新(3) → 最新(4)
 // stat 用于统计条口径：与卡片状态徽章一一对应（"本地较新"计入 latest）
 function classifyTool(tool) {
+  // 当前平台不支持的工具（如 Muse CLI 在 Windows 上）：显示"平台不支持"，不提供安装/更新
+  if (tool.supported === false) {
+    return { rank: 5, statusClass: 'status-unsupported', statusText: '平台不支持', canUpdate: false, canInstall: false, stat: 'unsupported', cardClass: 'card-unsupported' };
+  }
   if (tool.notFound) {
     return { rank: 1, statusClass: 'status-not-installed', statusText: '未安装', canUpdate: false, canInstall: true, stat: 'install', cardClass: 'card-not-installed' };
   }
@@ -476,6 +487,9 @@ function buildActionsHtml(tool, cls) {
     actionBtn = `<button class="btn btn-primary btn-update btn-sm" data-id="${id}" ${locked}>更新</button>`;
   } else if (cls.canInstall) {
     actionBtn = `<button class="btn btn-success btn-install btn-sm" data-id="${id}" ${locked}>安装</button>`;
+  } else if (cls.stat === 'unsupported') {
+    // 当前平台不支持：按钮置灰且不可点击（无 data-id，事件委托不会响应）
+    actionBtn = `<button class="btn btn-sm" disabled title="当前平台不支持安装 ${escapeHtml(tool.name)}">不支持</button>`;
   } else {
     actionBtn = `<button class="btn btn-primary btn-sm" disabled>已是最新</button>`;
   }
@@ -533,7 +547,7 @@ function renderTools() {
       <div class="card-progress"></div>
       <div class="tool-card-body">
         <div class="tool-header">
-          <h3 class="tool-name">${escapeHtml(tool.name)} ${customBadge}</h3>
+          <h3 class="tool-name"><span class="tool-icon" aria-hidden="true">${escapeHtml(tool.icon || tool.name.charAt(0).toUpperCase())}</span>${escapeHtml(tool.name)} ${customBadge}</h3>
           <span class="tool-status ${cls.statusClass}">${cls.statusText}</span>
         </div>
         <div class="version-info">
@@ -579,6 +593,8 @@ function updateStatsBar(stats) {
   document.getElementById('stat-install').textContent = stats.install;
   document.getElementById('stat-latest').textContent = stats.latest;
   document.getElementById('stat-error').textContent = stats.error;
+  const statUnsupported = document.getElementById('stat-unsupported');
+  if (statUnsupported) statUnsupported.textContent = stats.unsupported || 0;
 
   // 更新各统计概率上的活跃状态（点击可过滤）
   const chips = bar.querySelectorAll('.stat-chip[data-filter]');
@@ -812,7 +828,8 @@ async function updateAll() {
 
 // ===== 一键安装全部未安装工具 =====
 async function installAll() {
-  const ids = toolsData.filter(t => !t.installed).map(t => t.id);
+  // 仅安装未安装且当前平台支持的工具（如 Muse CLI 在 Windows 上不支持，跳过）
+  const ids = toolsData.filter(t => !t.installed && t.supported !== false).map(t => t.id);
   if (ids.length === 0) return;
 
   if (updatingTools.size > 0) return;
@@ -1062,6 +1079,40 @@ async function exportLog() {
   }
 }
 
+// ===== 导出全部工具版本报告 =====
+async function exportVersionReport() {
+  if (!toolsData.length) {
+    appendLog('info', 'system', '请先点击「检测版本」再导出');
+    return;
+  }
+  const registryName = selectRegistry.selectedOptions[0] ? selectRegistry.selectedOptions[0].textContent : '未知';
+  const lines = [
+    '# AI 工具版本报告',
+    '',
+    `- 生成时间: ${new Date().toLocaleString()}`,
+    `- 操作系统: ${envOs.textContent || '未知'}`,
+    `- 镜像源: ${registryName}`,
+    '',
+    '| 工具 | 状态 | 当前版本 | 最新版本 |',
+    '|---|---|---|---|',
+  ];
+  for (const t of toolsData) {
+    const cls = classifyTool(t);
+    // 表格内容转义竖线，防止工具名/版本号破坏表格结构
+    const esc = (v) => String(v || '-').replace(/\|/g, '\\|');
+    lines.push(`| ${esc(t.name)} | ${cls.statusText} | ${esc(t.currentVersion)} | ${esc(t.latestVersion)} |`);
+  }
+  try {
+    const result = await window.electronAPI.exportReport({
+      text: lines.join('\n'),
+      defaultName: `ai-tools-report-${new Date().toISOString().slice(0, 10)}.md`
+    });
+    if (!result || !result.success) appendLog('info', 'system', '已取消导出版本报告');
+  } catch (err) {
+    appendLog('error', 'system', `导出报告失败: ${err.message}`);
+  }
+}
+
 // ===== 工具函数 =====
 function getToolName(toolId) {
   const tool = toolsData.find(t => t.id === toolId);
@@ -1213,11 +1264,26 @@ function showConfirmModal(title, message, confirmText = '确认', confirmVariant
       install: parseInt(document.getElementById('stat-install').textContent, 10) || 0,
       latest:  parseInt(document.getElementById('stat-latest').textContent,  10) || 0,
       error:   parseInt(document.getElementById('stat-error').textContent,   10) || 0,
+      unsupported: parseInt((document.getElementById('stat-unsupported') || {}).textContent || '0', 10) || 0,
     });
   });
 })();
 
 // ===== 镜像源测速 =====
+/**
+ * 测速全部预设镜像源，返回 [{ name, url, success, ms, message }]
+ * 供「测速」展示与「自动选最快」共用，避免两处重复实现
+ */
+async function measureAllRegistries() {
+  const registries = await window.electronAPI.getRegistries();
+  return Promise.all(
+    registries.map(async (reg) => {
+      const res = await window.electronAPI.pingRegistry(reg.url);
+      return { name: reg.name, url: reg.url, ...res };
+    })
+  );
+}
+
 /**
  * 对所有预设镜像源进行延迟测试，在设置弹框中展示结果
  */
@@ -1231,13 +1297,7 @@ async function pingAllRegistries() {
   speedResults.innerHTML = '<div class="ping-loading">正在测速，请稍候...</div>';
 
   try {
-    const registries = await window.electronAPI.getRegistries();
-    const results = await Promise.all(
-      registries.map(async (reg) => {
-        const res = await window.electronAPI.pingRegistry(reg.url);
-        return { name: reg.name, url: reg.url, ...res };
-      })
-    );
+    const results = await measureAllRegistries();
 
     speedResults.innerHTML = results.map(r => {
       const ms = r.ms != null ? `${r.ms}ms` : '—';
@@ -1253,6 +1313,33 @@ async function pingAllRegistries() {
     speedResults.innerHTML = `<div class="ping-error">测速失败: ${escapeHtml(err.message)}</div>`;
   } finally {
     if (btnPing) { btnPing.disabled = false; btnPing.textContent = '🚀 测速'; }
+  }
+}
+
+/**
+ * 自动测速并切换到最快的镜像源
+ */
+async function autoSelectFastestRegistry() {
+  const btnAuto = document.getElementById('btn-auto-registry');
+  if (btnAuto) { btnAuto.disabled = true; btnAuto.textContent = '选择中...'; }
+  try {
+    const results = await measureAllRegistries();
+    const fastest = results.filter(r => r.success).sort((a, b) => a.ms - b.ms)[0];
+    if (!fastest) {
+      appendLog('error', 'system', '所有镜像源测速失败，无法自动选择');
+      return;
+    }
+    const result = await window.electronAPI.setRegistry(fastest.url);
+    if (!result.success) {
+      appendLog('error', 'system', result.message || '切换镜像源失败');
+      return;
+    }
+    await loadRegistries();
+    appendLog('success', 'system', `已自动切换到最快镜像源: ${fastest.name} (${fastest.ms}ms)`);
+  } catch (err) {
+    appendLog('error', 'system', `自动选择镜像源失败: ${err.message}`);
+  } finally {
+    if (btnAuto) { btnAuto.disabled = false; btnAuto.textContent = '⚡ 自动选最快'; }
   }
 }
 

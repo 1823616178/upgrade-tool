@@ -9,8 +9,9 @@
 - 支持多种 AI 编程助手：Kimi、Claude、Codex、OpenCode、CodeBuddy、Qwen、Antigravity、AtomCode、Qoder、Grok、Command Code 等
 - 自定义 npm 工具与自定义镜像源
 - 卡片按状态排序（可更新置顶）+ 检测统计摘要、执行中进度反馈、changelog 快捷链接
-- 系统托盘、后台静默定时检测通知、设置页（检测间隔 / 最小化到托盘 / 开机自启）
+- 系统托盘、后台静默定时检测通知、设置页（检测间隔 / 最小化到托盘 / 开机自启 / 启动最小化）
 - 实时日志：级别 / 工具筛选、关键词搜索、复制 / 导出
+- 镜像源测速与一键自动切换最快源、工具 emoji 徽章、Markdown 版本报告导出
 
 ## 安装
 

@@ -7,6 +7,7 @@
     "start": "electron . --disable-gpu-shader-disk-cache",
     "build": "electron-builder",
     "build:win": "electron-builder --win",
+    "sign:win": "powershell -ExecutionPolicy Bypass -File scripts/sign-and-build.ps1",
     "build:mac": "electron-builder --mac",
     "icons": "node scripts/generate-icons.js",
     "test": "node scripts/verify-semver.js",

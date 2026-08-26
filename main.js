@@ -74,16 +74,16 @@ try {
 // updateCmd 不再硬编码，而是根据当前镜像源动态生成（见 getAllTools）
 // installScript: { win, unix } — 脚本安装类工具的安装命令（数据驱动，消除 doInstallOrUpdate 中的 if/else 链）
 const BUILTIN_TOOLS = [
-  { id: 'kimi',       name: 'Kimi Code',              cmd: 'kimi',       pkg: '@moonshot-ai/kimi-code',        versionArg: '--version' },
-  { id: 'claude',     name: 'Claude Code',             cmd: 'claude',     pkg: '@anthropic-ai/claude-code',     versionArg: '--version' },
-  { id: 'codex',      name: 'OpenAI Codex',            cmd: 'codex',      pkg: '@openai/codex',                 versionArg: '--version' },
-  { id: 'opencode',   name: 'OpenCode',                cmd: 'opencode',   pkg: 'opencode-ai',                   versionArg: '--version' },
-  { id: 'codebuddy',  name: 'CodeBuddy',               cmd: 'codebuddy',  pkg: '@tencent-ai/codebuddy-code',    versionArg: '--version' },
-  { id: 'qwen',       name: 'Qwen Code',               cmd: 'qwen',       pkg: '@qwen-code/qwen-code',          versionArg: '--version' },
-  { id: 'commandcode', name: 'Command Code',            cmd: 'command-code', pkg: 'command-code',                versionArg: '--version' },
+  { id: 'kimi',       name: 'Kimi Code',              cmd: 'kimi',       pkg: '@moonshot-ai/kimi-code',        versionArg: '--version', icon: '🌙' },
+  { id: 'claude',     name: 'Claude Code',             cmd: 'claude',     pkg: '@anthropic-ai/claude-code',     versionArg: '--version', icon: '✳️' },
+  { id: 'codex',      name: 'OpenAI Codex',            cmd: 'codex',      pkg: '@openai/codex',                 versionArg: '--version', icon: '🔷' },
+  { id: 'opencode',   name: 'OpenCode',                cmd: 'opencode',   pkg: 'opencode-ai',                   versionArg: '--version', icon: '🖥️' },
+  { id: 'codebuddy',  name: 'CodeBuddy',               cmd: 'codebuddy',  pkg: '@tencent-ai/codebuddy-code',    versionArg: '--version', icon: '🤖' },
+  { id: 'qwen',       name: 'Qwen Code',               cmd: 'qwen',       pkg: '@qwen-code/qwen-code',          versionArg: '--version', icon: '💡' },
+  { id: 'commandcode', name: 'Command Code',            cmd: 'command-code', pkg: 'command-code',                versionArg: '--version', icon: '⚡' },
   {
     // antigravity 使用独立的安装脚本；已安装时改用 agy update（在 doInstallOrUpdate 中特判）
-    id: 'antigravity', name: 'Antigravity CLI', cmd: 'agy', versionArg: '--version',
+    id: 'antigravity', name: 'Antigravity CLI', cmd: 'agy', versionArg: '--version', icon: '🪐',
     installScript: {
       win:  'Import-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue; irm https://antigravity.google/cli/install.ps1 | iex',
       unix: 'curl -sSL https://antigravity.google/cli/install.sh | bash'
@@ -91,7 +91,7 @@ const BUILTIN_TOOLS = [
     docsUrl: 'https://antigravity.google/'
   },
   {
-    id: 'atomcode', name: 'AtomCode', cmd: 'atomcode', versionArg: '--version',
+    id: 'atomcode', name: 'AtomCode', cmd: 'atomcode', versionArg: '--version', icon: '⚛️',
     installScript: {
       // 先终止正在运行的进程再安装，最后写 PATH
       win:  'Write-Host \'[AtomCode] Stopping running atomcode process...\'; taskkill /f /im atomcode.exe 2>$null | Out-Null; Start-Sleep -Milliseconds 800; Import-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue; irm https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/install.ps1 | iex; $atomDir = Join-Path $env:LOCALAPPDATA \'AtomCode\'; $userPath = [Environment]::GetEnvironmentVariable(\'PATH\', \'User\'); if ($userPath -notlike "*$atomDir*") { [Environment]::SetEnvironmentVariable(\'PATH\', "$userPath;$atomDir", \'User\'); Write-Host \'[AtomCode] Added atomcode dir to user PATH\' }',
@@ -100,7 +100,7 @@ const BUILTIN_TOOLS = [
     docsUrl: 'https://atomgit.com/'
   },
   {
-    id: 'qoder', name: 'Qoder CLI', cmd: 'qodercli', pkg: '@qoder-ai/qodercli', versionArg: '--version',
+    id: 'qoder', name: 'Qoder CLI', cmd: 'qodercli', pkg: '@qoder-ai/qodercli', versionArg: '--version', icon: '🚀',
     installScript: {
       win:  'Import-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue; irm https://qoder.com/install.ps1 | iex',
       unix: 'curl -fsSL https://qoder.com/install | bash'
@@ -109,7 +109,7 @@ const BUILTIN_TOOLS = [
   },
   {
     // qoder_cn 安装的是 qoderclicn 命令，与国际版 qodercli 不同
-    id: 'qoder_cn', name: 'Qoder CLI (国内镜像)', cmd: 'qoderclicn', versionArg: '--version',
+    id: 'qoder_cn', name: 'Qoder CLI (国内镜像)', cmd: 'qoderclicn', versionArg: '--version', icon: '🐉',
     installScript: {
       win:  'Import-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue; irm https://qoder.com.cn/install.ps1 | iex',
       unix: 'curl -fsSL https://qoder.com.cn/install | bash'
@@ -118,7 +118,7 @@ const BUILTIN_TOOLS = [
   },
   {
     // grok 使用 xAI 官方安装脚本，不通过 npm 安装
-    id: 'grok', name: 'Grok CLI', cmd: 'grok', versionArg: '--version',
+    id: 'grok', name: 'Grok CLI', cmd: 'grok', versionArg: '--version', icon: '🛸',
     installScript: {
       win:  'Import-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue; irm https://x.ai/cli/install.ps1 | iex',
       unix: 'curl -fsSL https://x.ai/cli/install | bash'
@@ -126,12 +126,14 @@ const BUILTIN_TOOLS = [
     docsUrl: 'https://x.ai/'
   },
   {
-    id: 'muse', name: 'Muse CLI', cmd: 'muse', versionArg: '--version',
+    id: 'muse', name: 'Muse CLI', cmd: 'muse', versionArg: '--version', icon: '🎭',
     installScript: {
       win:  'Write-Host "[Muse] Trying to install via WSL (Windows Subsystem for Linux)..."; wsl -e bash -c "curl -fsSL https://dev.meta.ai/install.sh | bash"',
       unix: 'curl -fsSL https://dev.meta.ai/install.sh | bash'
     },
-    docsUrl: 'https://dev.meta.ai/'
+    docsUrl: 'https://dev.meta.ai/',
+    // Muse CLI 官方脚本仅支持 macOS/Linux，Windows 上无法直接安装（WSL 内安装不满足使用场景），故在 Windows 上隐藏安装入口
+    platforms: ['darwin', 'linux']
   },
 ];
 
@@ -190,6 +192,8 @@ function getAllTools() {
   ];
   return all.map(t => ({
     ...t,
+    // 是否支持当前平台（未声明 platforms 的工具视为全平台支持）
+    supported: !t.platforms || t.platforms.includes(os.platform()),
     // 脚本安装类工具走 installScript，updateCmd 留空
     updateCmd: (!t.installScript && t.pkg)
       ? `npm install -g ${t.pkg}@latest --registry=${currentRegistry}`
@@ -249,7 +253,9 @@ function createWindow() {
 
   // 页面加载完成后显示窗口
   mainWindow.once('ready-to-show', () => {
-    mainWindow.show();
+    // 开启「启动时最小化到托盘」时，窗口创建后不显示，等用户从托盘打开
+    const settings = loadSettings();
+    if (!settings.startMinimized) mainWindow.show();
   });
 
   // 关闭窗口时最小化到托盘（如果用户开启了该选项且托盘已创建）
@@ -822,6 +828,22 @@ async function checkLocalVersion(tool, options = {}) {
       return { installed: false, version: null, normalizedVersion: null, notFound: isCommandNotFound(innerErr), error: innerErr.message };
     }
   }
+  // Muse CLI 在 Windows 上通过 WSL 安装，需要通过 WSL 检测版本
+  if (tool.id === 'muse' && os.platform() === 'win32') {
+    try {
+      // 先尝试通过 WSL 检测（muse 安装在 WSL 内部）
+      const output = await execCommand('wsl', ['-e', 'bash', '-c', `${tool.cmd} ${tool.versionArg} 2>/dev/null`], { shell: false });
+      const version = output.split(/\r?\n/)[0].trim();
+      if (version) {
+        log('info', 'muse', `通过 WSL 检测到版本: ${version}`);
+        return { installed: true, version, normalizedVersion: extractVersionNumber(version) };
+      }
+    } catch (err) {
+      log('info', 'muse', `WSL 检测失败: ${err.message}，尝试 Windows 原生路径...`);
+    }
+    // WSL 检测失败后，仍然 fall through 到下面的通用逻辑，
+    // 以防用户也在 Windows 原生环境安装了 muse
+  }
 
   try {
     const output = await execCommand(tool.cmd, [tool.versionArg], { shell: true });
@@ -1072,6 +1094,13 @@ async function doInstallOrUpdate(toolId) {
   const tools = getAllTools();
   const tool = tools.find(t => t.id === toolId);
   if (!tool) throw new Error('未知工具');
+
+  // 当前平台不支持的工具（如 Muse CLI 在 Windows 上无官方安装脚本）：拒绝安装/更新
+  if (tool.supported === false) {
+    const msg = `${tool.name} 不支持当前平台（${os.platform()}），无法安装/更新`;
+    sendLog('error', toolId, msg);
+    return { success: false, message: msg };
+  }
 
   // 无安装脚本且无 npm 包名：无法安装
   if (!tool.installScript && !tool.pkg && !tool.updateCmd) {
@@ -1512,6 +1541,21 @@ ipcMain.handle('export-log', async (event, logText) => {
 ipcMain.handle('copy-to-clipboard', (event, text) => {
   clipboard.writeText(text);
   return { success: true };
+});
+
+// 弹出保存对话框，将版本报告文本写入用户选择的文件
+ipcMain.handle('export-report', async (event, { text, defaultName } = {}) => {
+  const { filePath } = await dialog.showSaveDialog(mainWindow, {
+    title: '导出版本报告',
+    defaultPath: defaultName || `ai-tools-version-report-${new Date().toISOString().slice(0, 10)}.md`,
+    filters: [{ name: '文档 / 文本', extensions: ['md', 'json', 'txt'] }]
+  });
+  if (filePath) {
+    fs.writeFileSync(filePath, text, 'utf-8');
+    sendLog('success', 'system', `版本报告已导出到: ${filePath}`);
+    return { success: true, filePath };
+  }
+  return { success: false };
 });
 
 // ===== 管理员权限提示 IPC =====

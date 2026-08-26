@@ -67,6 +67,9 @@
                     <button id="btn-open-powershell" class="btn btn-tool" title="一键打开 PowerShell 窗口">
                         <span class="icon">💻</span> PowerShell
                     </button>
+                    <button id="btn-export-report" class="btn btn-tool" title="导出全部工具版本报告">
+                        <span class="icon">📊</span> 版本报告
+                    </button>
                     <button id="btn-install-agyyolo" class="btn btn-tool" title="将 agyyolo 函数永久配置到 PowerShell">
                         <span class="icon">⚡</span> 配置 yolo
                     </button>
@@ -89,6 +92,7 @@
                 <span class="stat-chip stat-chip-install" data-filter="install" title="点击过滤未安装工具">📦 <b id="stat-install">0</b> 未安装</span>
                 <span class="stat-chip stat-chip-latest" data-filter="latest" title="点击过滤最新工具">✅ <b id="stat-latest">0</b> 最新</span>
                 <span class="stat-chip stat-chip-error" data-filter="error" title="点击过滤检测失败工具">⚠️ <b id="stat-error">0</b> 检测失败</span>
+                <span class="stat-chip stat-chip-unsupported" data-filter="unsupported" title="点击过滤当前平台不支持的工具">🚫 <b id="stat-unsupported">0</b> 平台不支持</span>
             </div>
 
             <div id="tools-grid" class="tools-grid">
@@ -200,11 +204,18 @@
                         <span>开机自动启动（仅安装版生效）</span>
                     </label>
                 </div>
+                <div class="form-group form-row">
+                    <label class="checkbox-label" for="check-start-minimized">
+                        <input id="check-start-minimized" type="checkbox" />
+                        <span>启动时最小化到系统托盘</span>
+                    </label>
+                </div>
                 <!-- 镜像源测速 -->
                 <div class="form-group">
                     <div style="display:flex; align-items:center; justify-content:space-between;">
                         <label style="margin:0">🏃 镜像源延迟测试</label>
                         <button id="btn-ping-registry" class="btn btn-tool btn-sm" type="button">🚀 测速</button>
+                        <button id="btn-auto-registry" class="btn btn-tool btn-sm" type="button">⚡ 自动选最快</button>
                     </div>
                     <div id="registry-speed-results" class="ping-results" style="display:none;"></div>
                 </div>

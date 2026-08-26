@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Shell(node --check main.js)",
+      "Shell(node --check script.js)",
+      "Shell(node --check preload.js)",
+      "Shell(node scripts/verify-semver.js)",
+      "Shell(npm:*)"
+    ],
+    "deny": [],
+    "defaultMode": "default"
+  }
+}

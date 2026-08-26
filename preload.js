@@ -50,6 +50,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 导出日志到文件
   exportLog: (logText) => ipcRenderer.invoke('export-log', logText),
 
+  // 导出版本报告（Markdown / JSON / 文本）
+  exportReport: (payload) => ipcRenderer.invoke('export-report', payload),
+
   // 复制文本到剪贴板
   copyToClipboard: (text) => ipcRenderer.invoke('copy-to-clipboard', text),
 
