@@ -82,6 +82,13 @@
     },
     "win": {
       "icon": "build/icon.ico",
+      "cscLink": "build/certificate.pfx",
+      "cscKeyPassword": "123456",
+      "verifyUpdateCodeSignature": false,
+      "signtoolOptions": {
+        "publisherName": "AI Code Tool Updater",
+        "signingHashAlgorithms": ["sha256"]
+      },
       "target": [
         {
           "target": "nsis",
@@ -95,10 +102,7 @@
             "x64"
           ]
         }
-      ],
-      "signtoolOptions": {
-        "publisherName": "AI Code Tool Updater"
-      }
+      ]
     },
     "nsis": {
       "oneClick": false,
