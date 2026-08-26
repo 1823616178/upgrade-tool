@@ -80,6 +80,7 @@ const BUILTIN_TOOLS = [
   { id: 'opencode',   name: 'OpenCode',                cmd: 'opencode',   pkg: 'opencode-ai',                   versionArg: '--version' },
   { id: 'codebuddy',  name: 'CodeBuddy',               cmd: 'codebuddy',  pkg: '@tencent-ai/codebuddy-code',    versionArg: '--version' },
   { id: 'qwen',       name: 'Qwen Code',               cmd: 'qwen',       pkg: '@qwen-code/qwen-code',          versionArg: '--version' },
+  { id: 'commandcode', name: 'Command Code',            cmd: 'command-code', pkg: 'command-code',                versionArg: '--version' },
   {
     // antigravity 使用独立的安装脚本；已安装时改用 agy update（在 doInstallOrUpdate 中特判）
     id: 'antigravity', name: 'Antigravity CLI', cmd: 'agy', versionArg: '--version',
