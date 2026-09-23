@@ -6,6 +6,14 @@ const fs = require('fs');
 const { spawn } = require('child_process');
 const os = require('os');
 
+// 全局只允许一个应用实例。后续启动的实例会立即退出，并通知首个实例唤醒主窗口。
+// 必须在 app ready 之前申请锁，避免两个进程同时创建窗口、托盘和后台任务。
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+
+if (!hasSingleInstanceLock) {
+  app.quit();
+}
+
 // ===== 镜像源配置 =====
 // 支持 npm 官方源和淘宝镜像源，用户可在设置中切换
 const REGISTRIES = [
@@ -64,7 +72,8 @@ let currentRegistry = REGISTRIES[0].url;
 // 从持久化配置中恢复用户上次选择的镜像源
 try {
   const saved = loadSettings();
-  if (saved.registry) {
+  // settings.json 可能被手工改过，恢复前同样做一次校验（isValidRegistryUrl 为函数声明，已提升）
+  if (saved.registry && isValidRegistryUrl(saved.registry)) {
     currentRegistry = saved.registry;
   }
 } catch { /* 首次启动，无配置文件，使用默认值 */ }
@@ -81,6 +90,8 @@ const BUILTIN_TOOLS = [
   { id: 'codebuddy',  name: 'CodeBuddy',               cmd: 'codebuddy',  pkg: '@tencent-ai/codebuddy-code',    versionArg: '--version', icon: '🤖' },
   { id: 'qwen',       name: 'Qwen Code',               cmd: 'qwen',       pkg: '@qwen-code/qwen-code',          versionArg: '--version', icon: '💡' },
   { id: 'commandcode', name: 'Command Code',            cmd: 'command-code', pkg: 'command-code',                versionArg: '--version', icon: '⚡' },
+  // 小米 MiMo Code（https://github.com/XiaomiMiMo/MiMo-Code），npm 包 @mimo-ai/cli 提供 mimo 命令
+  { id: 'mimo',       name: 'MiMo Code',               cmd: 'mimo',       pkg: '@mimo-ai/cli',                  versionArg: '--version', icon: '🍊' },
   {
     // antigravity 使用独立的安装脚本；已安装时改用 agy update（在 doInstallOrUpdate 中特判）
     id: 'antigravity', name: 'Antigravity CLI', cmd: 'agy', versionArg: '--version', icon: '🪐',
@@ -100,7 +111,8 @@ const BUILTIN_TOOLS = [
     docsUrl: 'https://atomgit.com/'
   },
   {
-    id: 'qoder', name: 'Qoder CLI', cmd: 'qodercli', pkg: '@qoder-ai/qodercli', versionArg: '--version', icon: '🚀',
+    // altCmds：主命令检测失败时依次尝试的备用命令名（旧版安装的是 qoder）
+    id: 'qoder', name: 'Qoder CLI', cmd: 'qodercli', altCmds: ['qoder'], pkg: '@qoder-ai/qodercli', versionArg: '--version', icon: '🚀',
     installScript: {
       win:  'Import-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue; irm https://qoder.com/install.ps1 | iex',
       unix: 'curl -fsSL https://qoder.com/install | bash'
@@ -126,14 +138,17 @@ const BUILTIN_TOOLS = [
     docsUrl: 'https://x.ai/'
   },
   {
+    // Muse CLI 官方已提供 Windows 原生安装脚本（x64 / ARM64），装到 %LOCALAPPDATA%\Programs\muse\muse.cmd 并写入用户 PATH
+    // 重新执行安装脚本即会拉取 channel 最新版本，因此更新与安装共用同一脚本
+    // checkEnv：版本检测时附加的环境变量。muse launcher 每次运行都会触发后台自更新（二进制缺失时甚至前台下载 ~400MB），
+    // 检测版本不应产生副作用，故禁用自动更新
     id: 'muse', name: 'Muse CLI', cmd: 'muse', versionArg: '--version', icon: '🎭',
+    checkEnv: { MUSE_NO_AUTO_UPDATE: '1' },
     installScript: {
-      win:  'Write-Host "[Muse] Trying to install via WSL (Windows Subsystem for Linux)..."; wsl -e bash -c "curl -fsSL https://dev.meta.ai/install.sh | bash"',
+      win:  'Import-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue; irm https://dev.meta.ai/install.ps1 | iex',
       unix: 'curl -fsSL https://dev.meta.ai/install.sh | bash'
     },
-    docsUrl: 'https://dev.meta.ai/',
-    // Muse CLI 官方脚本仅支持 macOS/Linux，Windows 上无法直接安装（WSL 内安装不满足使用场景），故在 Windows 上隐藏安装入口
-    platforms: ['darwin', 'linux']
+    docsUrl: 'https://dev.meta.ai/'
   },
 ];
 
@@ -162,8 +177,10 @@ function getCustomToolsPath() {
  */
 function loadCustomTools() {
   try {
-    const data = fs.readFileSync(getCustomToolsPath(), 'utf-8');
-    return JSON.parse(data);
+    const data = JSON.parse(fs.readFileSync(getCustomToolsPath(), 'utf-8'));
+    if (!Array.isArray(data)) return [];
+    // 包名 / 命令名会被拼进 shell 命令，文件可能被手工改过，加载时再校验一次（校验函数为函数声明，已提升）
+    return data.filter(t => t && t.id && isValidNpmPackage(t.pkg) && isValidCliCommand(t.cmd));
   } catch {
     return [];
   }
@@ -207,6 +224,7 @@ function getAllTools() {
 let mainWindow = null;    // 主窗口实例
 let tray = null;          // 系统托盘实例
 let backgroundTimer = null; // 后台版本检测定时器引用
+let isQuitting = false;   // 应用正在退出（Cmd+Q / 系统关机等），此时关窗不再拦截为最小化到托盘
 
 /**
  * 创建主应用窗口
@@ -261,7 +279,7 @@ function createWindow() {
   // 关闭窗口时最小化到托盘（如果用户开启了该选项且托盘已创建）
   mainWindow.on('close', (event) => {
     const settings = loadSettings();
-    if (settings.minimizeToTray !== false && tray) {
+    if (!isQuitting && settings.minimizeToTray !== false && tray) {
       event.preventDefault();
       mainWindow.hide();
       return;
@@ -285,6 +303,9 @@ function createWindow() {
  */
 function showOrCreateWindow() {
   if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) {
+      mainWindow.restore();
+    }
     mainWindow.show();
     mainWindow.focus();
     return mainWindow;
@@ -346,10 +367,11 @@ function createTray() {
     {
       label: '退出',
       click: () => {
-        // 真正退出应用（销毁托盘后调用 app.exit）
+        // 真正退出应用：走 app.quit() 正常退出流程（before-quit 会放行窗口关闭），
+        // 不用 app.exit()，避免跳过清理、打断尚未写完的设置文件
         tray.destroy();
         tray = null;
-        app.exit(0);
+        app.quit();
       }
     }
   ]);
@@ -374,12 +396,16 @@ function startBackgroundCheck() {
   stopBackgroundCheck(); // 先清除已有定时器，避免重复
   const settings = loadSettings();
   // 注意：0 表示禁用，不能用 || 否则 0 会被当成 falsy 回退到 4
-  const hours = settings.backgroundCheckHours ?? 4;
+  // 旧版本可能存下了非法值（如 NaN），此时回退默认 4 小时，避免 setInterval(NaN) 近乎无间隔触发
+  const saved = settings.backgroundCheckHours ?? 4;
+  const hours = Number.isFinite(saved) ? saved : 4;
   if (hours <= 0) return; // 用户禁用了后台检测
 
   const intervalMs = hours * 60 * 60 * 1000;
   backgroundTimer = setInterval(async () => {
     try {
+      // 用户可能在应用外安装/卸载了工具，先刷新 PATH（命中 TTL 缓存时不拉起子进程）
+      await refreshProcessPath();
       const tools = getAllTools();
       // 后台定时检测静默执行（不刷日志窗口），仅在有更新时弹系统通知
       const results = await Promise.all(tools.map(t => checkTool(t, { silent: true })));
@@ -438,33 +464,44 @@ function applyLoginItem(openAtLogin) {
   } catch { /* 平台不支持时静默忽略 */ }
 }
 
-// Electron 就绪后创建窗口、托盘并启动后台检测
-app.whenReady().then(() => {
-  createWindow();
-  createTray();
-  startBackgroundCheck();
-  // 恢复用户的开机自启动设置（仅打包版实际生效）
-  const settings = loadSettings();
-  if (settings.openAtLogin) {
-    applyLoginItem(true);
-  }
-});
+if (hasSingleInstanceLock) {
+  // 再次启动应用时不创建新实例，只恢复并聚焦已有的主窗口。
+  app.on('second-instance', () => {
+    showOrCreateWindow();
+  });
 
-// 所有窗口关闭时：如果托盘存在则保持运行（最小化到托盘），否则退出
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    if (!tray) {
-      app.quit();
-    }
-  }
-});
+  // 标记正在退出，让窗口 close 事件放行（否则托盘存在时 app.quit 会被拦截为隐藏窗口）
+  app.on('before-quit', () => {
+    isQuitting = true;
+    stopBackgroundCheck();
+  });
 
-// macOS 上点击 Dock 图标时重新创建窗口
-app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) {
+  // Electron 就绪后创建窗口、托盘并启动后台检测
+  app.whenReady().then(() => {
     createWindow();
-  }
-});
+    createTray();
+    startBackgroundCheck();
+    // 恢复用户的开机自启动设置（仅打包版实际生效）
+    const settings = loadSettings();
+    if (settings.openAtLogin) {
+      applyLoginItem(true);
+    }
+  });
+
+  // 所有窗口关闭时：如果托盘存在则保持运行（最小化到托盘），否则退出
+  app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') {
+      if (!tray) {
+        app.quit();
+      }
+    }
+  });
+
+  // macOS 上点击 Dock 图标时重新创建窗口
+  app.on('activate', () => {
+    showOrCreateWindow();
+  });
+}
 
 // ===== 日志发送工具 =====
 
@@ -485,6 +522,39 @@ function sendLog(type, toolId, message) {
 // 版本检测子进程超时时间（毫秒），防止命令卡住
 const CHECK_TIMEOUT = 30000;
 
+// 远端版本查询（manifest / API）的 HTTP 超时（毫秒），防止网络挂起导致整轮检测卡在“检测中”
+const HTTP_TIMEOUT = 10000;
+
+/**
+ * 带超时的 fetch
+ * @param {string} url
+ * @param {object} [options] - 透传给 fetch
+ * @param {number} [timeoutMs]
+ */
+function fetchWithTimeout(url, options = {}, timeoutMs = HTTP_TIMEOUT) {
+  return fetch(url, { ...options, signal: AbortSignal.timeout(timeoutMs) });
+}
+
+/**
+ * 终止子进程及其所有后代进程
+ * Windows 上 child.kill() 只会结束 cmd.exe / powershell.exe 本身，真正干活的 npm、下载进程会成为孤儿继续运行，
+ * 需用 taskkill /T 连同进程树一起结束
+ * @param {import('child_process').ChildProcess} child
+ */
+function killProcessTree(child) {
+  if (!child || child.exitCode !== null || !child.pid) return;
+  if (os.platform() === 'win32') {
+    try {
+      spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
+        .on('error', () => { try { child.kill(); } catch { /* ignore */ } });
+    } catch {
+      try { child.kill(); } catch { /* ignore */ }
+    }
+  } else {
+    try { child.kill(); } catch { /* ignore */ }
+  }
+}
+
 /**
  * 执行系统命令并返回 stdout 输出
  * - Windows 下支持通过 cmd.exe 执行 shell 命令
@@ -498,12 +568,13 @@ const CHECK_TIMEOUT = 30000;
 function execCommand(command, args = [], options = {}) {
   return new Promise((resolve, reject) => {
     const isWin = os.platform() === 'win32';
+    const env = options.env || process.env;
     let child;
     if (isWin && options.shell) {
       // Windows 下通过 cmd.exe 执行，支持 .bat/.cmd 等
-      child = spawn('cmd.exe', ['/c', command, ...args], { env: process.env, windowsHide: true });
+      child = spawn('cmd.exe', ['/c', command, ...args], { env, windowsHide: true });
     } else {
-      child = spawn(command, args, { env: process.env, shell: options.shell || false, windowsHide: true });
+      child = spawn(command, args, { env, shell: options.shell || false, windowsHide: true });
     }
 
     let stdout = '';
@@ -515,7 +586,7 @@ function execCommand(command, args = [], options = {}) {
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
-      child.kill();
+      killProcessTree(child);
       reject(new Error(`命令执行超时（${timeoutMs / 1000}s）`));
     }, timeoutMs);
 
@@ -607,7 +678,15 @@ function comparePrerelease(a, b) {
     const xb = pb[i];
     const na = /^\d+$/.test(xa) ? parseInt(xa, 10) : null;
     const nb = /^\d+$/.test(xb) ? parseInt(xb, 10) : null;
-    if (na !== null && nb !== null) {
+    // 同前缀的「字母+数字」段（如 Muse 的 R999 vs R3401）按数字比较，
+    // 否则按 ASCII 字典序会得出 R999 > R3401 的错误结论
+    const ma = xa.match(/^([A-Za-z]+)(\d+)$/);
+    const mb = xb.match(/^([A-Za-z]+)(\d+)$/);
+    if (ma && mb && ma[1] === mb[1]) {
+      const da = parseInt(ma[2], 10);
+      const db = parseInt(mb[2], 10);
+      if (da !== db) return da < db ? -1 : 1;
+    } else if (na !== null && nb !== null) {
       if (na !== nb) return na < nb ? -1 : 1;
     } else if (na !== null) {
       return -1;
@@ -644,9 +723,11 @@ function isRemoteNewer(localVersion, remoteVersion) {
 
 /**
  * 校验 npm 镜像源 URL（仅允许 http/https）
+ * 镜像源会被拼进 cmd.exe / sh -c 执行的命令串，必须拒绝 shell 特殊字符防止命令注入
  */
 function isValidRegistryUrl(url) {
   if (!url || typeof url !== 'string') return false;
+  if (/[\s;&|`$<>(){}\\'"!^%*]/.test(url.trim())) return false;
   try {
     const parsed = new URL(url.trim());
     return parsed.protocol === 'http:' || parsed.protocol === 'https:';
@@ -802,56 +883,43 @@ async function checkLocalVersion(tool, options = {}) {
       }
     }
   }
-  if (tool.id === 'qoder') {
-    // 国际版：先试 qodercli，再试 qoder
+  // 依次尝试主命令与备用命令（altCmds），任一成功即视为已安装
+  const cmds = [tool.cmd, ...(tool.altCmds || [])];
+  let lastErr = null;
+  for (const cmd of cmds) {
     try {
-      const output = await execCommand('qodercli', [tool.versionArg], { shell: true });
+      const env = tool.checkEnv ? { ...process.env, ...tool.checkEnv } : undefined;
+      const output = await execCommand(cmd, [tool.versionArg], { shell: true, env });
       const version = output.split(/\r?\n/)[0].trim();
       return { installed: true, version, normalizedVersion: extractVersionNumber(version) };
     } catch (err) {
-      try {
-        const output = await execCommand('qoder', [tool.versionArg], { shell: true });
-        const version = output.split(/\r?\n/)[0].trim();
-        return { installed: true, version, normalizedVersion: extractVersionNumber(version) };
-      } catch (innerErr) {
-        return { installed: false, version: null, normalizedVersion: null, notFound: isCommandNotFound(innerErr), error: innerErr.message };
-      }
+      lastErr = err;
     }
   }
-  if (tool.id === 'qoder_cn') {
-    // 国内镜像版：安装的是 qoderclicn 命令
-    try {
-      const output = await execCommand('qoderclicn', [tool.versionArg], { shell: true });
-      const version = output.split(/\r?\n/)[0].trim();
-      return { installed: true, version, normalizedVersion: extractVersionNumber(version) };
-    } catch (innerErr) {
-      return { installed: false, version: null, normalizedVersion: null, notFound: isCommandNotFound(innerErr), error: innerErr.message };
-    }
+  let notFound = isCommandNotFound(lastErr);
+  // Windows 下 cmd.exe 的「不是内部或外部命令」按系统代码页（中文系统为 GBK）输出，按 UTF-8 解码后是乱码，
+  // 且 cmd /c 带参数时退出码为 1 而非 9009，上面的判断会漏掉 → 未安装的工具被误显示为「检测失败」。
+  // 这里用 where 的退出码兜底确认（与系统语言无关）
+  if (!notFound && os.platform() === 'win32') {
+    notFound = !(await anyCommandExists(cmds));
   }
-  // Muse CLI 在 Windows 上通过 WSL 安装，需要通过 WSL 检测版本
-  if (tool.id === 'muse' && os.platform() === 'win32') {
-    try {
-      // 先尝试通过 WSL 检测（muse 安装在 WSL 内部）
-      const output = await execCommand('wsl', ['-e', 'bash', '-c', `${tool.cmd} ${tool.versionArg} 2>/dev/null`], { shell: false });
-      const version = output.split(/\r?\n/)[0].trim();
-      if (version) {
-        log('info', 'muse', `通过 WSL 检测到版本: ${version}`);
-        return { installed: true, version, normalizedVersion: extractVersionNumber(version) };
-      }
-    } catch (err) {
-      log('info', 'muse', `WSL 检测失败: ${err.message}，尝试 Windows 原生路径...`);
-    }
-    // WSL 检测失败后，仍然 fall through 到下面的通用逻辑，
-    // 以防用户也在 Windows 原生环境安装了 muse
-  }
+  return { installed: false, version: null, normalizedVersion: null, notFound, error: lastErr.message };
+}
 
-  try {
-    const output = await execCommand(tool.cmd, [tool.versionArg], { shell: true });
-    const version = output.split(/\r?\n/)[0].trim();
-    return { installed: true, version, normalizedVersion: extractVersionNumber(version) };
-  } catch (err) {
-    return { installed: false, version: null, normalizedVersion: null, notFound: isCommandNotFound(err), error: err.message };
+/**
+ * Windows：通过 where.exe 判断命令是否存在于 PATH（任一存在即返回 true）
+ * where 找不到时退出码为 1，与系统语言无关
+ * @param {string[]} cmds - 命令名（均已通过 isValidCliCommand 或为内置常量）
+ * @returns {Promise<boolean>}
+ */
+async function anyCommandExists(cmds) {
+  for (const cmd of cmds) {
+    try {
+      await execCommand('where', [cmd], { shell: false, timeout: 5000 });
+      return true;
+    } catch { /* 继续尝试下一个 */ }
   }
+  return false;
 }
 
 /**
@@ -894,7 +962,7 @@ async function checkLatestVersion(tool) {
   if (tool.id === 'antigravity') {
     try {
       const platform = getAntigravityPlatform();
-      const res = await fetch(`https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/${platform}.json`);
+      const res = await fetchWithTimeout(`https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/${platform}.json`);
       if (!res.ok) {
         throw new Error(`HTTP error! status: ${res.status}`);
       }
@@ -909,7 +977,7 @@ async function checkLatestVersion(tool) {
   // AtomCode 通过 AtomGit API 获取线上最新 release 版本
   if (tool.id === 'atomcode') {
     try {
-      const res = await fetch('https://api.atomgit.com/api/v5/repos/atomgit_atomcode/atomcode/releases/latest', {
+      const res = await fetchWithTimeout('https://api.atomgit.com/api/v5/repos/atomgit_atomcode/atomcode/releases/latest', {
         headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
       });
       if (!res.ok) {
@@ -927,7 +995,7 @@ async function checkLatestVersion(tool) {
   // qoder_cn 国内版：从官方 manifest 获取最新版本（binary 为 qoderclicn）
   if (tool.id === 'qoder_cn') {
     try {
-      const res = await fetch('https://static.qoder.com.cn/qoder-cli-cn/channels/manifest.json');
+      const res = await fetchWithTimeout('https://static.qoder.com.cn/qoder-cli-cn/channels/manifest.json');
       if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
       const manifest = await res.json();
       return { latest: manifest.latest };
@@ -948,7 +1016,7 @@ async function checkLatestVersion(tool) {
     let lastErr = null;
     for (const url of manifestUrls) {
       try {
-        const res = await fetch(url);
+        const res = await fetchWithTimeout(url);
         if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
         const manifest = await res.json();
         if (manifest && manifest.latest) return { latest: manifest.latest };
@@ -970,7 +1038,7 @@ async function checkLatestVersion(tool) {
     let lastErr = null;
     for (const url of channelUrls) {
       try {
-        const res = await fetch(url, {
+        const res = await fetchWithTimeout(url, {
           headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
         });
         if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
@@ -986,6 +1054,23 @@ async function checkLatestVersion(tool) {
     }
     return { latest: null, error: (lastErr && lastErr.message) || 'grok channel 版本获取失败' };
   }
+
+  // muse：与官方 launcher 一致，读取 channel 指针（默认 muse-stable），版本形如 1.3.0-R3401.1
+  if (tool.id === 'muse') {
+    const channel = process.env.MUSE_CHANNEL || 'muse-stable';
+    try {
+      const res = await fetchWithTimeout(`https://api.meta.ai/muse-code/channels/${encodeURIComponent(channel)}`);
+      if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+      const manifest = await res.json();
+      if (!manifest || !manifest.version) throw new Error('channel 响应中无 version 字段');
+      return { latest: String(manifest.version).trim() };
+    } catch (err) {
+      return { latest: null, error: err.message };
+    }
+  }
+
+  // 其余无 npm 包名的工具（脚本安装类）没有远端版本来源，不要再去跑 npm view undefined
+  if (!tool.pkg) return { latest: null, error: '无远端版本来源' };
 
   // 普通 npm 工具：优先走 registry HTTP 接口（毫秒级），失败再回退到 npm view 子进程
   const viaHttp = await fetchLatestFromRegistry(tool.pkg);
@@ -1095,7 +1180,7 @@ async function doInstallOrUpdate(toolId) {
   const tool = tools.find(t => t.id === toolId);
   if (!tool) throw new Error('未知工具');
 
-  // 当前平台不支持的工具（如 Muse CLI 在 Windows 上无官方安装脚本）：拒绝安装/更新
+  // 当前平台不支持的工具（BUILTIN_TOOLS 中声明了 platforms 且不含当前平台）：拒绝安装/更新
   if (tool.supported === false) {
     const msg = `${tool.name} 不支持当前平台（${os.platform()}），无法安装/更新`;
     sendLog('error', toolId, msg);
@@ -1173,60 +1258,63 @@ async function doInstallOrUpdate(toolId) {
     }
   }
 
-  return new Promise((resolve, reject) => {
+  return runStreamingCommand(tool, shellCmd, shellArgs, childEnv, {
+    action: '安装',
+    successMsg: `${tool.name} 操作完成`
+  });
+}
+
+// 安装/卸载子进程超时（5 分钟），防止子进程挂起导致 UI 锁死
+const INSTALL_TIMEOUT = 5 * 60 * 1000;
+
+/**
+ * 启动安装/卸载子进程，实时把输出转发到渲染进程日志，并统一处理权限错误与超时
+ * @param {object} tool - 工具配置（用于日志归属）
+ * @param {string} shellCmd - 可执行文件
+ * @param {string[]} shellArgs - 参数
+ * @param {object} env - 子进程环境变量
+ * @param {object} labels - { action: '安装'|'卸载', successMsg }
+ * @returns {Promise<object>} { success, code?, message? }（不会 reject）
+ */
+function runStreamingCommand(tool, shellCmd, shellArgs, env, { action, successMsg }) {
+  const isWin = os.platform() === 'win32';
+  const adminTip = isWin ? '请尝试右键以管理员身份运行本应用，或检查杀毒软件是否拦截了子进程。' : '请检查执行权限。';
+
+  return new Promise((resolve) => {
+    const fail = (msg, extra = {}) => {
+      sendLog('error', tool.id, msg);
+      resolve({ success: false, message: msg, ...extra });
+    };
+
     let child;
     try {
-      child = spawn(shellCmd, shellArgs, {
-        env: childEnv,
-        // Windows 上避免继承父进程的安全描述符，减少 EPERM 概率
-        windowsHide: true,
-        // 不创建新进程组，避免某些安全软件拦截
-        detached: false
-      });
+      // windowsHide 隐藏控制台窗口；不 detached，避免某些安全软件拦截新进程组
+      child = spawn(shellCmd, shellArgs, { env, windowsHide: true, detached: false });
     } catch (spawnErr) {
       // spawn 同步抛出的错误（如 EPERM）
       const isPermError = spawnErr.code === 'EPERM' || spawnErr.code === 'EACCES';
-      const msg = isPermError
-        ? `权限不足，无法启动安装进程。${isWin ? '请尝试以管理员身份运行本应用，或检查杀毒软件是否拦截了子进程创建。' : '请检查执行权限。'}`
-        : `启动安装进程失败: ${spawnErr.message}`;
-      sendLog('error', tool.id, msg);
-      resolve({ success: false, message: msg });
+      fail(isPermError ? `权限不足，无法启动${action}进程。${adminTip}` : `启动${action}进程失败: ${spawnErr.message}`);
       return;
     }
 
-    // 安装/更新超时保护（5 分钟），防止子进程挂起导致 UI 锁死
     let settled = false;
-    const INSTALL_TIMEOUT = 5 * 60 * 1000;
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
-      try { child.kill(); } catch { /* ignore */ }
-      sendLog('error', tool.id, `操作超时（${INSTALL_TIMEOUT / 1000}s），已终止子进程`);
-      resolve({ success: false, message: '操作超时' });
+      killProcessTree(child);
+      fail(`${action}超时（${INSTALL_TIMEOUT / 1000}s），已终止子进程`);
     }, INSTALL_TIMEOUT);
 
-    // 实时转发 stdout 到渲染进程日志
-    child.stdout.on('data', (data) => {
-      const text = data.toString();
-      sendLog('data', tool.id, text);
-    });
-
-    // 实时转发 stderr 到渲染进程日志
-    child.stderr.on('data', (data) => {
-      const text = data.toString();
-      sendLog('data', tool.id, text);
-    });
+    // 实时转发 stdout / stderr 到渲染进程日志
+    child.stdout.on('data', (data) => sendLog('data', tool.id, data.toString()));
+    child.stderr.on('data', (data) => sendLog('data', tool.id, data.toString()));
 
     child.on('error', (err) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       const isPermError = err.code === 'EPERM' || err.code === 'EACCES';
-      const msg = isPermError
-        ? `权限被拒绝: ${err.message}。${isWin ? 'Windows 上全局安装 npm 包可能需要管理员权限，请尝试右键以管理员身份运行本应用。' : ''}`
-        : `操作失败: ${err.message}`;
-      sendLog('error', tool.id, msg);
-      resolve({ success: false, message: msg });
+      fail(isPermError ? `权限被拒绝: ${err.message}。${adminTip}` : `${action}失败: ${err.message}`);
     });
 
     child.on('close', (code) => {
@@ -1234,12 +1322,10 @@ async function doInstallOrUpdate(toolId) {
       settled = true;
       clearTimeout(timer);
       if (code === 0) {
-        sendLog('success', tool.id, `${tool.name} 操作完成`);
+        sendLog('success', tool.id, successMsg);
         resolve({ success: true });
       } else {
-        const msg = `退出码: ${code}（Windows 上可能需要以管理员身份运行）`;
-        sendLog('error', tool.id, msg);
-        resolve({ success: false, code, message: msg });
+        fail(`${action}退出码: ${code}（Windows 上可能需要以管理员身份运行）`, { code });
       }
     });
   });
@@ -1279,62 +1365,9 @@ async function doUninstall(toolId) {
   const shellCmd = isWin ? 'cmd.exe' : 'sh';
   const shellArgs = isWin ? ['/c', uninstallCmd] : ['-c', uninstallCmd];
 
-  return new Promise((resolve, reject) => {
-    let child;
-    try {
-      child = spawn(shellCmd, shellArgs, {
-        env: { ...process.env, NPM_CONFIG_REGISTRY: currentRegistry },
-        windowsHide: true,
-        detached: false
-      });
-    } catch (spawnErr) {
-      const isPermError = spawnErr.code === 'EPERM' || spawnErr.code === 'EACCES';
-      const msg = isPermError
-        ? `权限不足，无法启动卸载进程。${isWin ? '请尝试以管理员身份运行本应用。' : '请检查执行权限。'}`
-        : `启动卸载进程失败: ${spawnErr.message}`;
-      sendLog('error', tool.id, msg);
-      resolve({ success: false, message: msg });
-      return;
-    }
-
-    let settled = false;
-    const UNINSTALL_TIMEOUT = 5 * 60 * 1000;
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      try { child.kill(); } catch { /* ignore */ }
-      sendLog('error', tool.id, `卸载超时（${UNINSTALL_TIMEOUT / 1000}s），已终止子进程`);
-      resolve({ success: false, message: '卸载超时' });
-    }, UNINSTALL_TIMEOUT);
-
-    child.stdout.on('data', (data) => sendLog('data', tool.id, data.toString()));
-    child.stderr.on('data', (data) => sendLog('data', tool.id, data.toString()));
-
-    child.on('error', (err) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      const isPermError = err.code === 'EPERM' || err.code === 'EACCES';
-      const msg = isPermError
-        ? `权限被拒绝: ${err.message}。${isWin ? '请尝试以管理员身份运行本应用。' : ''}`
-        : `卸载失败: ${err.message}`;
-      sendLog('error', tool.id, msg);
-      resolve({ success: false, message: msg });
-    });
-
-    child.on('close', (code) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (code === 0) {
-        sendLog('success', tool.id, `${tool.name} 已卸载`);
-        resolve({ success: true });
-      } else {
-        const msg = `卸载退出码: ${code}（Windows 上可能需要以管理员身份运行）`;
-        sendLog('error', tool.id, msg);
-        resolve({ success: false, code, message: msg });
-      }
-    });
+  return runStreamingCommand(tool, shellCmd, shellArgs, { ...process.env, NPM_CONFIG_REGISTRY: currentRegistry }, {
+    action: '卸载',
+    successMsg: `${tool.name} 已卸载`
   });
 }
 
@@ -1424,6 +1457,7 @@ ipcMain.handle('set-registry', (event, url) => {
  * @param {object} toolConfig - { name, cmd, pkg, versionArg? }
  */
 ipcMain.handle('add-custom-tool', (event, toolConfig) => {
+  toolConfig = toolConfig || {};
   const name = (toolConfig.name || '').trim();
   const cmd = (toolConfig.cmd || '').trim();
   const pkg = (toolConfig.pkg || '').trim();
@@ -1597,8 +1631,21 @@ ipcMain.handle('get-settings', () => {
   return loadSettings();
 });
 
+// 渲染进程允许修改的设置项及校验规则（registry 只能走 set-registry，那里有注入校验）
+const SETTINGS_SCHEMA = {
+  backgroundCheckHours: (v) => Number.isFinite(v) && v >= 0 && v <= 24 * 30,
+  minimizeToTray: (v) => typeof v === 'boolean',
+  openAtLogin: (v) => typeof v === 'boolean',
+  startMinimized: (v) => typeof v === 'boolean',
+};
+
 // 保存设置，如果后台检测间隔有变化则重启定时器，开机自启变化则应用登录项
-ipcMain.handle('save-settings', (event, newSettings) => {
+ipcMain.handle('save-settings', (event, input) => {
+  // 只接受白名单内且类型合法的字段：例如 backgroundCheckHours 为 NaN 会让 setInterval 近乎无间隔地狂跑
+  const newSettings = {};
+  for (const [key, isValid] of Object.entries(SETTINGS_SCHEMA)) {
+    if (input && key in input && isValid(input[key])) newSettings[key] = input[key];
+  }
   saveSettings(newSettings);
   if ('backgroundCheckHours' in newSettings) {
     startBackgroundCheck();
@@ -1772,19 +1819,21 @@ ipcMain.handle('ping-registry', async (event, url) => {
   }
   const pingUrl = url.trim().replace(/\/$/, '') + '/';
   const start = Date.now();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
     const res = await fetch(pingUrl, {
       method: 'HEAD',
       signal: controller.signal,
       headers: { 'User-Agent': 'npm-registry-ping' }
     });
-    clearTimeout(timeout);
     const ms = Date.now() - start;
     return { success: true, ms, status: res.status };
   } catch (err) {
     const ms = Date.now() - start;
     return { success: false, ms, message: err.name === 'AbortError' ? '请求超时（>8s）' : err.message };
+  } finally {
+    // 请求失败时也要清理定时器
+    clearTimeout(timeout);
   }
 });

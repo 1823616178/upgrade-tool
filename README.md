@@ -6,7 +6,7 @@
 
 - 自动检测 AI 编程工具本地/远端版本（semver 比较含预发布规则，仅提示真正有更新的工具）
 - 一键安装、更新、卸载（npm 全局包）
-- 支持多种 AI 编程助手：Kimi、Claude、Codex、OpenCode、CodeBuddy、Qwen、Antigravity、AtomCode、Qoder、Grok、Command Code 等
+- 支持多种 AI 编程助手：Kimi、Claude、Codex、OpenCode、CodeBuddy、Qwen、Antigravity、AtomCode、Qoder、Grok、Command Code、MiMo Code 等
 - 自定义 npm 工具与自定义镜像源
 - 卡片按状态排序（可更新置顶）+ 检测统计摘要、执行中进度反馈、changelog 快捷链接
 - 系统托盘、后台静默定时检测通知、设置页（检测间隔 / 最小化到托盘 / 开机自启 / 启动最小化）

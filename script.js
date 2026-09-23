@@ -445,7 +445,7 @@ function renderSkeleton(tools) {
 // rank 用于排序：可更新(0) → 未安装/检测失败(1) → 远端检测失败(2) → 本地较新(3) → 最新(4)
 // stat 用于统计条口径：与卡片状态徽章一一对应（"本地较新"计入 latest）
 function classifyTool(tool) {
-  // 当前平台不支持的工具（如 Muse CLI 在 Windows 上）：显示"平台不支持"，不提供安装/更新
+  // 当前平台不支持的工具（声明了 platforms 且不含当前平台）：显示"平台不支持"，不提供安装/更新
   if (tool.supported === false) {
     return { rank: 5, statusClass: 'status-unsupported', statusText: '平台不支持', canUpdate: false, canInstall: false, stat: 'unsupported', cardClass: 'card-unsupported' };
   }
@@ -518,7 +518,7 @@ function renderTools() {
   toolsGrid.innerHTML = '';
   let updateCount = 0;
   let installCount = 0;
-  const stats = { update: 0, install: 0, latest: 0, error: 0 };
+  const stats = { update: 0, install: 0, latest: 0, error: 0, unsupported: 0 };
 
   // 按状态排序（稳定排序，同类内保持原顺序）
   const sorted = [...toolsData].sort((a, b) => classifyTool(a).rank - classifyTool(b).rank);
@@ -733,10 +733,12 @@ async function openPowerShell() {
 async function uninstallTool(toolId) {
   if (updatingTools.has(toolId)) return;
   const name = getToolName(toolId);
+  // showConfirmModal 的正文走 innerHTML，工具名（可能是用户自定义）必须转义
+  const safeName = escapeHtml(name);
   // 使用自定义模态框替代原生 confirm()
   const confirmed = await showConfirmModal(
     `确定卸载 ${name}？`,
-    `将卸载 <b>${name}</b>。未安装的 npm 包将被移除。`,
+    `将卸载 <b>${safeName}</b>，其全局安装的 npm 包会被移除。`,
     '卸载',
     'danger'
   );
@@ -754,7 +756,7 @@ async function uninstallTool(toolId) {
       if (result.docsUrl) {
         const goDoc = await showConfirmModal(
           `${name} 需手动卸载`,
-          `${name} 通过官方脚本安装，无统一卸载命令。是否打开官方文档？<br><small style="color:var(--text-muted)">${result.docsUrl}</small>`,
+          `${safeName} 通过官方脚本安装，无统一卸载命令。是否打开官方文档？<br><small style="color:var(--text-muted)">${escapeHtml(result.docsUrl)}</small>`,
           '打开官方文档',
           'primary'
         );
@@ -775,7 +777,7 @@ async function removeCustomTool(toolId) {
   const name = getToolName(toolId);
   const confirmed = await showConfirmModal(
     `移除自定义工具`,
-    `确定要从列表中移除「${name}」吗？<br><small style="color:var(--text-muted)">不会卸载已安装的 npm 包</small>`,
+    `确定要从列表中移除「${escapeHtml(name)}」吗？<br><small style="color:var(--text-muted)">不会卸载已安装的 npm 包</small>`,
     '移除',
     'danger'
   );
@@ -794,67 +796,55 @@ async function removeCustomTool(toolId) {
 // ===== 一键更新全部 =====
 async function updateAll() {
   const ids = toolsData.filter(t => t.needsUpdate).map(t => t.id);
-  if (ids.length === 0) return;
-
-  if (updatingTools.size > 0) return;
-
-  appendLog('start', 'system', `开始一键更新 ${ids.length} 个工具...`);
-
-  try {
-    for (let i = 0; i < ids.length; i++) {
-      const toolId = ids[i];
-      btnUpdateAll.innerHTML = `<span class="icon">⏳</span> 更新中 (${i + 1}/${ids.length})`;
-      updatingTools.add(toolId);
-      updateUIState(true, toolId);
-      appendLog('start', toolId, `开始更新 ${getToolName(toolId)} ...`);
-      const result = await window.electronAPI.updateTool(toolId);
-      if (!result.success) {
-        appendLog('error', toolId, result.message || '更新失败');
-      }
-      updatingTools.delete(toolId);
-      await refreshSingleTool(toolId);
-    }
-    appendLog('success', 'system', '全部更新任务执行完毕');
-  } catch (err) {
-    appendLog('error', 'system', `一键更新异常: ${err.message}`);
-  } finally {
-    btnUpdateAll.innerHTML = '<span class="icon">🚀</span> 一键更新全部';
-    updateUIState(false);
-    // 循环中每个工具都已经 refreshSingleTool 过了，这里只需重排/重绘，
-    // 不必再对全部工具（含没动过的）跑一次完整检测
-    renderTools();
-  }
+  await runBatch(ids, btnUpdateAll, window.electronAPI.updateTool, {
+    verb: '更新', idleHtml: '<span class="icon">🚀</span> 一键更新全部'
+  });
 }
 
 // ===== 一键安装全部未安装工具 =====
 async function installAll() {
-  // 仅安装未安装且当前平台支持的工具（如 Muse CLI 在 Windows 上不支持，跳过）
+  // 仅安装未安装且当前平台支持的工具（不支持的跳过）
   const ids = toolsData.filter(t => !t.installed && t.supported !== false).map(t => t.id);
-  if (ids.length === 0) return;
+  await runBatch(ids, btnInstallAll, window.electronAPI.installTool, {
+    verb: '安装', idleHtml: '<span class="icon">📦</span> 一键安装全部'
+  });
+}
 
-  if (updatingTools.size > 0) return;
+/**
+ * 逐个执行批量安装/更新（updateAll 与 installAll 共用）
+ * 每个工具独立 try/finally：单个工具 IPC 异常不会中断后续工具，也不会让它的操作锁永远不释放
+ * @param {string[]} ids - 待处理的工具 ID
+ * @param {HTMLButtonElement} button - 顶部批量按钮（显示进度）
+ * @param {(toolId: string) => Promise<object>} action - updateTool / installTool
+ * @param {{ verb: string, idleHtml: string }} labels
+ */
+async function runBatch(ids, button, action, { verb, idleHtml }) {
+  if (ids.length === 0 || updatingTools.size > 0) return;
 
-  appendLog('start', 'system', `开始一键安装 ${ids.length} 个工具...`);
+  appendLog('start', 'system', `开始一键${verb} ${ids.length} 个工具...`);
 
   try {
     for (let i = 0; i < ids.length; i++) {
       const toolId = ids[i];
-      btnInstallAll.innerHTML = `<span class="icon">⏳</span> 安装中 (${i + 1}/${ids.length})`;
+      button.innerHTML = `<span class="icon">⏳</span> ${verb}中 (${i + 1}/${ids.length})`;
       updatingTools.add(toolId);
       updateUIState(true, toolId);
-      appendLog('start', toolId, `开始安装 ${getToolName(toolId)} ...`);
-      const result = await window.electronAPI.installTool(toolId);
-      if (!result.success) {
-        appendLog('error', toolId, result.message || '安装失败');
+      appendLog('start', toolId, `开始${verb} ${getToolName(toolId)} ...`);
+      try {
+        const result = await action(toolId);
+        if (!result.success) {
+          appendLog('error', toolId, result.message || `${verb}失败`);
+        }
+      } catch (err) {
+        appendLog('error', toolId, `${verb}异常: ${err.message}`);
+      } finally {
+        updatingTools.delete(toolId);
       }
-      updatingTools.delete(toolId);
       await refreshSingleTool(toolId);
     }
-    appendLog('success', 'system', '全部安装任务执行完毕');
-  } catch (err) {
-    appendLog('error', 'system', `一键安装异常: ${err.message}`);
+    appendLog('success', 'system', `全部${verb}任务执行完毕`);
   } finally {
-    btnInstallAll.innerHTML = '<span class="icon">📦</span> 一键安装全部';
+    button.innerHTML = idleHtml;
     updateUIState(false);
     // 循环中每个工具都已经 refreshSingleTool 过了，这里只需重排/重绘，
     // 不必再对全部工具（含没动过的）跑一次完整检测
@@ -1233,7 +1223,12 @@ function showConfirmModal(title, message, confirmText = '确认', confirmVariant
     const onOverlay = (e) => { if (e.target === overlay) cleanup(false); };
     const onKeydown = (e) => {
       if (e.key === 'Escape') cleanup(false);
-      if (e.key === 'Enter')  cleanup(true);
+      if (e.key === 'Enter') {
+        // 焦点在弹框按钮上时交给按钮自身处理：危险操作默认聚焦「取消」，
+        // 若这里一律 cleanup(true)，按回车反而会确认卸载
+        if (e.target instanceof HTMLButtonElement && overlay.contains(e.target)) return;
+        cleanup(true);
+      }
     };
 
     btnOk.addEventListener('click', onConfirm);
