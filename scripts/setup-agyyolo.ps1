@@ -55,12 +55,16 @@ function InstallFunctionToProfile($profilePath) {
 # 同时处理 PowerShell 5.1 与 PowerShell 7+ 的 CurrentUserCurrentHost Profile
 $profiles = @()
 
-# 当前正在运行的 PowerShell 的 $PROFILE
+# 当前正在运行的 PowerShell 的 $PROFILE（由 PowerShell 自己解析，最准确）
 $profiles += EnsureProfile $PROFILE
 
-# PowerShell 7+ 的 Profile（如果当前是 5.1，则 $PROFILE 指向 WindowsPowerShell）
-$ps7Profile = Join-Path $env:USERPROFILE "Documents\PowerShell\Microsoft.PowerShell_profile.ps1"
-$profiles += EnsureProfile $ps7Profile
+# 「文档」已知文件夹可能被 OneDrive 重定向，不能直接用 %USERPROFILE%\Documents
+$documents = [Environment]::GetFolderPath('MyDocuments')
+if ([string]::IsNullOrWhiteSpace($documents)) {
+    $documents = Join-Path $env:USERPROFILE 'Documents'
+}
+$profiles += EnsureProfile (Join-Path $documents 'WindowsPowerShell\Microsoft.PowerShell_profile.ps1')
+$profiles += EnsureProfile (Join-Path $documents 'PowerShell\Microsoft.PowerShell_profile.ps1')
 
 # 去重后逐个安装
 $results = @()

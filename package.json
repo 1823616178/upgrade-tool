@@ -84,8 +84,6 @@
     },
     "win": {
       "icon": "build/icon.ico",
-      "cscLink": "build/certificate.pfx",
-      "cscKeyPassword": "123456",
       "verifyUpdateCodeSignature": false,
       "signtoolOptions": {
         "publisherName": "AI Code Tool Updater",

@@ -5,13 +5,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:" />
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:" />
     <title>AI Code Tool Updater</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-        href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap"
-        rel="stylesheet" />
     <link rel="stylesheet" href="style.css" />
 </head>
 
@@ -100,6 +95,9 @@
             </div>
 
             <section class="log-section">
+                <!-- 日志面板高度拖拽条：贴在日志区顶部边缘 -->
+                <div id="log-resizer" class="log-resizer" role="separator" aria-orientation="horizontal"
+                    aria-label="调整日志面板高度" aria-valuemin="150" title="拖动调整日志高度，双击恢复默认" tabindex="0"></div>
                 <div class="log-header">
                     <h2>实时日志</h2>
                     <div class="log-filters">

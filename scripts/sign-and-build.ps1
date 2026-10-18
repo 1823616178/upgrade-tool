@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     AI Code Tool Updater - Windows 代码签名 & 打包脚本
 .DESCRIPTION
@@ -24,8 +24,8 @@ param(
     # 证书文件路径，默认为 build/certificate.pfx
     [string]$CertPath = "",
 
-    # 证书密码，默认为 123456
-    [string]$CertPassword = "123456",
+    # 证书密码；不传时依次读取 CSC_KEY_PASSWORD、build/.cert-password，或交互输入
+    [string]$CertPassword = "",
 
     # 证书主题名称
     [string]$Subject = "AI Code Tool Updater",
@@ -50,6 +50,7 @@ $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $BuildDir = Join-Path $ProjectRoot "build"
 $DistDir = Join-Path $ProjectRoot "dist"
+$PasswordFile = Join-Path $BuildDir ".cert-password"
 
 if (-not $CertPath) {
     $CertPath = Join-Path $BuildDir "certificate.pfx"
@@ -77,6 +78,40 @@ function Write-Warn {
 function Write-Fail {
     param([string]$Message)
     Write-Host "  [X] $Message" -ForegroundColor Red
+}
+
+function Resolve-CertPassword {
+    if ($CertPassword) { return $CertPassword }
+    if ($env:CSC_KEY_PASSWORD) { return $env:CSC_KEY_PASSWORD }
+
+    # 本地密码文件（.gitignore 已排除，不会提交）
+    if (Test-Path $PasswordFile) {
+        $saved = Get-Content -Path $PasswordFile -Raw -ErrorAction SilentlyContinue
+        if ($saved -and $saved.Trim()) { return $saved.Trim() }
+    }
+
+    if (Test-Path $CertPath) {
+        if (-not [Environment]::UserInteractive) {
+            throw "证书已存在但未提供密码，请通过 -CertPassword 或 CSC_KEY_PASSWORD 传入"
+        }
+        Write-Warn "未提供证书密码，请在弹出的提示中输入"
+        $secure = Read-Host "请输入 PFX 密码" -AsSecureString
+        $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+        try {
+            return [Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
+        } finally {
+            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+        }
+    }
+
+    # 首次生成证书：随机生成强密码并保存到本地密码文件
+    $generated = ([guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N'))
+    if (-not (Test-Path $BuildDir)) {
+        New-Item -ItemType Directory -Path $BuildDir -Force | Out-Null
+    }
+    [IO.File]::WriteAllText($PasswordFile, $generated)
+    Write-Success "已生成随机证书密码并保存到: $PasswordFile（请勿提交）"
+    return $generated
 }
 
 # ============================================================
@@ -143,38 +178,7 @@ function Ensure-Certificate {
 }
 
 # ============================================================
-# 2. 更新 package.json 签名配置
-# ============================================================
-function Update-PackageJson {
-    Write-Step "检查 package.json 签名配置"
-
-    $packageJsonPath = Join-Path $ProjectRoot "package.json"
-    $packageJson = Get-Content $packageJsonPath -Raw | ConvertFrom-Json
-
-    $changed = $false
-    $relativeCertPath = "build/certificate.pfx"
-
-    # 确保 win.cscLink 配置正确
-    if ($packageJson.build.win.cscLink -ne $relativeCertPath) {
-        $packageJson.build.win.cscLink = $relativeCertPath
-        $changed = $true
-    }
-
-    if ($packageJson.build.win.cscKeyPassword -ne $CertPassword) {
-        $packageJson.build.win.cscKeyPassword = $CertPassword
-        $changed = $true
-    }
-
-    if ($changed) {
-        $packageJson | ConvertTo-Json -Depth 10 | Set-Content $packageJsonPath -Encoding UTF8
-        Write-Success "已更新 package.json 签名配置"
-    } else {
-        Write-Success "package.json 签名配置无需修改"
-    }
-}
-
-# ============================================================
-# 3. 执行打包
+# 2. 执行打包
 # ============================================================
 function Start-Build {
     Write-Step "开始 electron-builder 打包 (Windows)"
@@ -199,7 +203,7 @@ function Start-Build {
 }
 
 # ============================================================
-# 4. 验证签名
+# 3. 验证签名
 # ============================================================
 function Verify-Signature {
     Write-Step "验证签名结果"
@@ -244,7 +248,7 @@ function Verify-Signature {
 }
 
 # ============================================================
-# 5. 输出摘要
+# 4. 输出摘要
 # ============================================================
 function Show-Summary {
     Write-Step "打包产物"
@@ -269,7 +273,9 @@ Write-Host "  AI Code Tool Updater - 签名打包脚本" -ForegroundColor Magent
 Write-Host "========================================" -ForegroundColor Magenta
 
 try {
-    # 1. 确保证书存在
+    # 1. 解析证书密码（优先参数 / 环境变量 / 本地密码文件，最后交互输入）
+    $CertPassword = Resolve-CertPassword
+    # 2. 确保证书存在
     Ensure-Certificate
 
     if ($CertOnly) {
@@ -278,15 +284,15 @@ try {
         exit 0
     }
 
-    # 2. 打包
+    # 3. 打包
     Start-Build
 
-    # 3. 验证签名
+    # 4. 验证签名
     if (-not $SkipVerify) {
         Verify-Signature
     }
 
-    # 4. 摘要
+    # 5. 摘要
     Show-Summary
 
     Write-Host ""

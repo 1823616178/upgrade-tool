@@ -6,6 +6,8 @@ let isChecking = false;
  * 使用 Set 维护“正在操作”的工具 ID，支持同时操作多个工具
  */
 const updatingTools = new Set();
+/** 批量更新/安装是否正在执行（防止局部刷新时误把批量按钮重新启用） */
+let isBatchRunning = false;
 /** 切换到「自定义源」前，记住当前选中的镜像源，取消时可恢复 */
 let previousRegistryUrl = '';
 /** stats 栏当前过滤状态（null=无过滤，字符串=展示对应类别） */
@@ -17,9 +19,21 @@ const logEntries = [];
 const logFilters = { level: '', tool: '', keyword: '' };
 /** 当前实际渲染到 DOM 的日志条数（增量渲染需要它来维护空状态与截断） */
 let visibleLogCount = 0;
+/** 日志搜索防抖定时器（避免每次按键都重建最多 2000 行 DOM） */
+let logSearchTimer = null;
+
+// ===== 日志面板高度 =====
+const LOG_HEIGHT_STORAGE_KEY = 'ai-tool-updater:log-panel-height';
+const MIN_LOG_HEIGHT = 150;
+const MIN_GRID_HEIGHT = 160;
+/** 当前日志面板高度（px）；null 表示尚未初始化 */
+let logPanelHeight = null;
 
 // ===== DOM 元素 =====
+const mainEl = document.querySelector('.main');
 const toolsGrid = document.getElementById('tools-grid');
+const logSection = document.querySelector('.log-section');
+const logResizer = document.getElementById('log-resizer');
 const logContainer = document.getElementById('log-container');
 const btnCheck = document.getElementById('btn-check');
 const btnUpdateAll = document.getElementById('btn-update-all');
@@ -75,16 +89,134 @@ const inputRegistryUrl = document.getElementById('input-registry-url');
 async function init() {
   bindEvents();
   bindLogListener();
+  applyPlatformUI();
+  initLogResizer();
 
-  // 并行执行：环境检测、镜像源加载、骨架屏渲染（基于真实工具列表，含自定义工具）
+  // 环境检测独立执行，不阻塞首屏和版本检测（Windows 上 npm -v 冷启动可能较慢）
+  checkEnvironment();
+
+  // 并行执行：镜像源加载、骨架屏渲染（基于真实工具列表，含自定义工具）
   await Promise.all([
-    checkEnvironment(),
     loadRegistries(),
     renderSkeletonFromTools()
   ]);
 
-  // 加载完成后旦即启动流式检测
+  // 加载完成后立即启动流式检测
   await checkVersions();
+}
+
+/** 根据运行平台调整 UI（隐藏 Windows 专属功能，macOS/Linux 用「终端」代替 PowerShell） */
+function applyPlatformUI() {
+  const platform = window.electronAPI.platform;
+  if (platform === 'win32') return;
+
+  if (btnInstallAgyyolo) btnInstallAgyyolo.style.display = 'none';
+  if (btnOpenPowerShell) {
+    btnOpenPowerShell.innerHTML = '<span class="icon">💻</span> 终端';
+    btnOpenPowerShell.title = platform === 'darwin' ? '打开 Terminal' : '打开终端';
+  }
+}
+
+// ===== 日志面板高度拖拽 =====
+/** 日志面板可用的最大高度：保证工具网格至少保留 MIN_GRID_HEIGHT */
+function getMaxLogPanelHeight() {
+  const style = getComputedStyle(mainEl);
+  const paddingBottom = parseFloat(style.paddingBottom) || 0;
+  const gap = parseFloat(style.rowGap) || parseFloat(style.gap) || 0;
+  const mainBottom = mainEl.getBoundingClientRect().bottom - paddingBottom;
+  const gridTop = toolsGrid.getBoundingClientRect().top;
+  return Math.max(MIN_LOG_HEIGHT, mainBottom - gridTop - MIN_GRID_HEIGHT - gap);
+}
+
+/** 设置日志面板高度（自动夹取到合法范围） */
+function setLogPanelHeight(height, { persist = false } = {}) {
+  const desired = Number.isFinite(height) ? height : logSection.getBoundingClientRect().height;
+  const clamped = Math.min(Math.max(Math.round(desired), MIN_LOG_HEIGHT), getMaxLogPanelHeight());
+
+  logPanelHeight = clamped;
+  logSection.style.flex = `0 0 ${clamped}px`;
+  logResizer.setAttribute('aria-valuenow', String(clamped));
+
+  if (persist) {
+    try {
+      localStorage.setItem(LOG_HEIGHT_STORAGE_KEY, String(clamped));
+    } catch { /* localStorage 不可用时忽略 */ }
+  }
+  return clamped;
+}
+
+/** 默认高度：主内容区高度的 30%（窗口首次布局前用视口高度兜底） */
+function getDefaultLogPanelHeight() {
+  const height = mainEl.getBoundingClientRect().height || window.innerHeight * 0.6;
+  return Math.round(height * 0.3);
+}
+
+/** 窗口尺寸或统计条显隐变化后，重新夹取日志高度，避免溢出 */
+function clampLogPanelHeight() {
+  if (logPanelHeight === null) return;
+  setLogPanelHeight(logPanelHeight);
+}
+
+/** 绑定日志面板拖拽、双击复位和键盘调整 */
+function initLogResizer() {
+  let saved = NaN;
+  try {
+    saved = Number(localStorage.getItem(LOG_HEIGHT_STORAGE_KEY));
+  } catch { /* localStorage 不可用时使用默认值 */ }
+
+  setLogPanelHeight(Number.isFinite(saved) && saved > 0 ? saved : getDefaultLogPanelHeight());
+
+  logResizer.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+
+    const startY = event.clientY;
+    const startHeight = logSection.getBoundingClientRect().height;
+    let nextHeight = startHeight;
+    let frame = null;
+
+    logResizer.classList.add('dragging');
+    document.body.classList.add('is-resizing-log');
+
+    const onMove = (ev) => {
+      // 向上拖动增加日志高度
+      nextHeight = startHeight + (startY - ev.clientY);
+      if (frame !== null) return;
+      frame = requestAnimationFrame(() => {
+        frame = null;
+        setLogPanelHeight(nextHeight);
+      });
+    };
+
+    const finish = () => {
+      if (frame !== null) cancelAnimationFrame(frame);
+      setLogPanelHeight(nextHeight, { persist: true });
+      logResizer.classList.remove('dragging');
+      document.body.classList.remove('is-resizing-log');
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', finish);
+      window.removeEventListener('pointercancel', finish);
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', finish);
+    window.addEventListener('pointercancel', finish);
+  });
+
+  // 双击恢复默认高度
+  logResizer.addEventListener('dblclick', () => {
+    setLogPanelHeight(getDefaultLogPanelHeight(), { persist: true });
+  });
+
+  // 键盘调整：聚焦拖拽条后使用上下方向键
+  logResizer.addEventListener('keydown', (event) => {
+    if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+    event.preventDefault();
+    const delta = event.key === 'ArrowUp' ? 24 : -24;
+    setLogPanelHeight((logPanelHeight ?? logSection.getBoundingClientRect().height) + delta, { persist: true });
+  });
+
+  window.addEventListener('resize', () => requestAnimationFrame(clampLogPanelHeight));
 }
 
 /** 从主进程获取真实工具列表并渲染骨架屏（内置 + 自定义，数量与名称始终同步） */
@@ -164,7 +296,13 @@ function bindEvents() {
   // 日志过滤
   logFilterLevel.addEventListener('change', () => { logFilters.level = logFilterLevel.value; renderLogs(); });
   logFilterTool.addEventListener('change', () => { logFilters.tool = logFilterTool.value; renderLogs(); });
-  logSearch.addEventListener('input', () => { logFilters.keyword = logSearch.value; renderLogs(); });
+  logSearch.addEventListener('input', () => {
+    clearTimeout(logSearchTimer);
+    logSearchTimer = setTimeout(() => {
+      logFilters.keyword = logSearch.value;
+      renderLogs();
+    }, 150);
+  });
 
   // Esc 关闭任意打开的模态框
   document.addEventListener('keydown', (e) => {
@@ -410,7 +548,7 @@ function renderSkeleton(tools) {
   toolsGrid.innerHTML = '';
   for (const tool of tools) {
     const card = document.createElement('div');
-    card.className = 'tool-card';
+    card.className = 'tool-card animate-in';
     // data-id 必须写上：流式检测结果回来时 updateSingleCard 靠它定位卡片，
     // 缺了会导致每个结果都退化成全量 renderTools()，骨架屏当场塌缩成一张卡
     card.dataset.id = tool.id;
@@ -513,28 +651,39 @@ function buildActionsHtml(tool, cls) {
   return actionBtn + uninstallBtn + changelogLink + removeBtn;
 }
 
-// ===== 渲染工具卡片 =====
-function renderTools() {
-  toolsGrid.innerHTML = '';
+// ===== 工具状态与统计（渲染与局部更新共用，避免重复 classify） =====
+function getToolStates() {
+  const ranked = toolsData.map(tool => ({ tool, cls: classifyTool(tool) }));
+  const stats = { update: 0, install: 0, latest: 0, error: 0, unsupported: 0 };
   let updateCount = 0;
   let installCount = 0;
-  const stats = { update: 0, install: 0, latest: 0, error: 0, unsupported: 0 };
-
-  // 按状态排序（稳定排序，同类内保持原顺序）
-  const sorted = [...toolsData].sort((a, b) => classifyTool(a).rank - classifyTool(b).rank);
-
-  for (let cardIdx = 0; cardIdx < sorted.length; cardIdx++) {
-    const tool = sorted[cardIdx];
-    const cls = classifyTool(tool);
+  for (const { cls } of ranked) {
     stats[cls.stat]++;
     if (cls.canUpdate) updateCount++;
     if (cls.canInstall) installCount++;
+  }
+  return { ranked, stats, updateCount, installCount };
+}
+
+// ===== 渲染工具卡片 =====
+function renderTools() {
+  // 只有首次渲染（骨架屏/空网格）才播放入场动画；局部刷新不重放，避免整页闪烁
+  const animateIn = toolsGrid.childElementCount === 0;
+  const scrollTop = toolsGrid.scrollTop;
+  toolsGrid.innerHTML = '';
+
+  const { ranked, stats, updateCount, installCount } = getToolStates();
+  // 按状态排序（稳定排序，同类内保持原顺序）
+  ranked.sort((a, b) => a.cls.rank - b.cls.rank);
+
+  for (let cardIdx = 0; cardIdx < ranked.length; cardIdx++) {
+    const { tool, cls } = ranked[cardIdx];
 
     // stats 栏过滤：如果当前有活跃过滤，只显示匹配类别的卡片
     if (statsFilter && cls.stat !== statsFilter) continue;
 
     const card = document.createElement('div');
-    card.className = `tool-card ${cls.cardClass}`;
+    card.className = `tool-card ${cls.cardClass}${animateIn ? ' animate-in' : ''}`;
     card.dataset.id = tool.id;
 
     // 自定义工具标识
@@ -566,18 +715,20 @@ function renderTools() {
     `;
 
     toolsGrid.appendChild(card);
-    // 入场动画逐张延迟（用 cardIdx 取代 O(n) indexOf）
-    card.style.animationDelay = `${cardIdx * 30}ms`;
+    if (animateIn) card.style.animationDelay = `${cardIdx * 30}ms`;
   }
 
   // 卡片按钮通过 toolsGrid 上的事件委托统一处理（见 bindEvents），此处无需逐个绑定
 
-  btnUpdateAll.disabled = updateCount === 0 || updatingTools.size > 0;
+  btnUpdateAll.disabled = isChecking || updateCount === 0 || updatingTools.size > 0 || isBatchRunning;
   // 当有未安装工具且不在更新状态时，启用一键安装
-  if (btnInstallAll) btnInstallAll.disabled = installCount === 0 || updatingTools.size > 0;
+  if (btnInstallAll) btnInstallAll.disabled = isChecking || installCount === 0 || updatingTools.size > 0 || isBatchRunning;
 
   updateStatsBar(stats);
   updateLogToolFilter();
+
+  // 重绘后恢复滚动位置（过滤/批量刷新时避免列表跳回顶部）
+  if (!animateIn) toolsGrid.scrollTop = scrollTop;
 }
 
 // ===== 统计摘要条 =====
@@ -602,6 +753,9 @@ function updateStatsBar(stats) {
     const filter = chip.dataset.filter;
     chip.classList.toggle('stat-chip-active', statsFilter === filter);
   });
+
+  // 统计条显隐会改变工具网格的起始位置，重新夹取日志高度避免溢出
+  clampLogPanelHeight();
 }
 
 // ===== 检测版本 =====
@@ -619,6 +773,8 @@ async function checkVersions() {
   // 最终 checkVersions 返回全部结果（用于应急投票原则等）
   try {
     toolsData = await window.electronAPI.checkVersions();
+    // 先解除检测状态再渲染，确保批量按钮按最终结果正确启用
+    isChecking = false;
     renderTools();
     appendLog('success', 'system', '版本检测完成');
   } catch (err) {
@@ -819,8 +975,9 @@ async function installAll() {
  * @param {{ verb: string, idleHtml: string }} labels
  */
 async function runBatch(ids, button, action, { verb, idleHtml }) {
-  if (ids.length === 0 || updatingTools.size > 0) return;
+  if (ids.length === 0 || isBatchRunning || updatingTools.size > 0) return;
 
+  isBatchRunning = true;
   appendLog('start', 'system', `开始一键${verb} ${ids.length} 个工具...`);
 
   try {
@@ -840,10 +997,11 @@ async function runBatch(ids, button, action, { verb, idleHtml }) {
       } finally {
         updatingTools.delete(toolId);
       }
-      await refreshSingleTool(toolId);
+      await refreshSingleTool(toolId, { rerender: false });
     }
     appendLog('success', 'system', `全部${verb}任务执行完毕`);
   } finally {
+    isBatchRunning = false;
     button.innerHTML = idleHtml;
     updateUIState(false);
     // 循环中每个工具都已经 refreshSingleTool 过了，这里只需重排/重绘，
@@ -853,14 +1011,23 @@ async function runBatch(ids, button, action, { verb, idleHtml }) {
 }
 
 // ===== 刷新单个工具 =====
-async function refreshSingleTool(toolId) {
+/**
+ * 重新检测单个工具并更新卡片
+ * @param {string} toolId
+ * @param {object} [options] - { rerender } 是否立即全量重排；批量更新时置 false，结束后统一渲染一次
+ */
+async function refreshSingleTool(toolId, { rerender = true } = {}) {
   try {
     const updated = await window.electronAPI.checkVersion(toolId);
     const idx = toolsData.findIndex(t => t.id === toolId);
     if (idx !== -1) {
       toolsData[idx] = updated;
+    } else {
+      toolsData.push(updated);
     }
-    renderTools();
+    // 局部更新卡片与统计，避免批量更新时 N 次全量重绘
+    updateSingleCard(updated);
+    if (rerender) renderTools();
   } catch (err) {
     appendLog('error', toolId, `刷新版本失败: ${err.message}`);
   }
@@ -1139,8 +1306,9 @@ function updateSingleCard(tool) {
     statusEl.textContent = cls.statusText;
   }
 
-  // 更新卡片边条颜色（保留 updating 状态）
-  existing.className = `tool-card ${cls.cardClass}${existing.classList.contains('updating') ? ' updating' : ''}`;
+  // 更新卡片边条颜色（保留 updating 与入场动画状态）
+  const keepAnim = existing.classList.contains('animate-in') ? ' animate-in' : '';
+  existing.className = `tool-card ${cls.cardClass}${existing.classList.contains('updating') ? ' updating' : ''}${keepAnim}`;
 
   // 更新版本号
   const versionValues = existing.querySelectorAll('.version-value');
@@ -1159,9 +1327,11 @@ function updateSingleCard(tool) {
     actionsEl.innerHTML = buildActionsHtml(tool, cls);
   }
 
-  // 同步顶部按钮状态
-  const hasUpdatable = toolsData.some(t => t.needsUpdate);
-  btnUpdateAll.disabled = !hasUpdatable || updatingTools.size > 0;
+  // 同步统计条与顶部按钮状态
+  const { stats, updateCount, installCount } = getToolStates();
+  updateStatsBar(stats);
+  btnUpdateAll.disabled = isChecking || updateCount === 0 || updatingTools.size > 0 || isBatchRunning;
+  if (btnInstallAll) btnInstallAll.disabled = isChecking || installCount === 0 || updatingTools.size > 0 || isBatchRunning;
 }
 
 // ===== 高亮并滚动到指定工具卡片（通知点击后定位） =====

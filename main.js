@@ -1,6 +1,6 @@
 // ===== Electron 主进程入口 =====
 // 依赖：electron（应用框架）、path/fs（文件操作）、child_process（执行系统命令）、os（系统信息）
-const { app, BrowserWindow, ipcMain, dialog, Tray, Menu, Notification, clipboard, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Tray, Menu, Notification, clipboard, shell, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
@@ -180,8 +180,10 @@ function loadCustomTools() {
   try {
     const data = JSON.parse(fs.readFileSync(getCustomToolsPath(), 'utf-8'));
     if (!Array.isArray(data)) return [];
-    // 包名 / 命令名会被拼进 shell 命令，文件可能被手工改过，加载时再校验一次（校验函数为函数声明，已提升）
-    return data.filter(t => t && t.id && isValidNpmPackage(t.pkg) && isValidCliCommand(t.cmd));
+    // 包名 / 命令名 / 版本参数会被拼进 shell 命令，文件可能被手工改过，加载时再校验一次（校验函数为函数声明，已提升）
+    return data
+      .filter(t => t && t.id && isValidNpmPackage(t.pkg) && isValidCliCommand(t.cmd) && isValidVersionArg(t.versionArg || '--version'))
+      .map(t => ({ ...t, versionArg: t.versionArg || '--version' }));
   } catch {
     return [];
   }
@@ -227,20 +229,44 @@ let tray = null;          // 系统托盘实例
 let backgroundTimer = null; // 后台版本检测定时器引用
 let isQuitting = false;   // 应用正在退出（Cmd+Q / 系统关机等），此时关窗不再拦截为最小化到托盘
 
+// 应用图标：Windows 用 ICO，macOS/Linux 用 PNG（macOS 的 Tray 不支持 ICO）
+const APP_ICON_PATH = process.platform === 'win32'
+  ? path.join(__dirname, 'build', 'icon.ico')
+  : path.join(__dirname, 'build', 'icon.png');
+
+/**
+ * 配置原生菜单
+ * - Windows/Linux：完全隐藏菜单栏
+ * - macOS：保留最简应用菜单（否则 Cmd+C/V/Q 等标准快捷键会失效）
+ */
+function configureApplicationMenu() {
+  if (process.platform !== 'darwin') {
+    Menu.setApplicationMenu(null);
+    return;
+  }
+  Menu.setApplicationMenu(Menu.buildFromTemplate([
+    { role: 'appMenu' },
+    { role: 'editMenu' },
+    { role: 'windowMenu' }
+  ]));
+}
+
 /**
  * 创建主应用窗口
  * - 设置窗口尺寸、最小尺寸、图标
  * - 启用 contextIsolation 安全策略，通过 preload.js 暴露 API
  * - 加载 index.html 作为 UI
  * - 关闭窗口时根据设置决定是否最小化到托盘
+ * @param {object} [options] - { show } true 时忽略「启动时最小化」，用于托盘/通知主动唤起
  */
-function createWindow() {
+function createWindow(options = {}) {
   mainWindow = new BrowserWindow({
     width: 1100,
     height: 760,
     minWidth: 900,
     minHeight: 600,
-    icon: path.join(__dirname, 'build', 'icon.ico'),
+    icon: APP_ICON_PATH,
+    backgroundColor: '#080c14',
     webPreferences: {
       nodeIntegration: false,    // 禁止渲染进程直接访问 Node.js
       contextIsolation: true,    // 隔离 preload 和渲染进程上下文
@@ -250,9 +276,6 @@ function createWindow() {
     autoHideMenuBar: true,
     show: false // 先隐藏，等 ready-to-show 再显示，避免白屏闪烁
   });
-
-  // 彻底隐藏原生菜单栏（不使用默认菜单）
-  Menu.setApplicationMenu(null);
 
   mainWindow.loadFile(path.join(__dirname, 'index.html'));
 
@@ -272,9 +295,11 @@ function createWindow() {
 
   // 页面加载完成后显示窗口
   mainWindow.once('ready-to-show', () => {
-    // 开启「启动时最小化到托盘」时，窗口创建后不显示，等用户从托盘打开
+    if (mainWindow.isDestroyed()) return;
+    // 开启「启动时最小化到托盘」时，窗口创建后不显示，等用户从托盘打开；
+    // 由托盘/通知/二次启动主动唤起时（options.show），忽略该设置
     const settings = loadSettings();
-    if (!settings.startMinimized) mainWindow.show();
+    if (options.show === true || !settings.startMinimized) mainWindow.show();
   });
 
   // 关闭窗口时最小化到托盘（如果用户开启了该选项且托盘已创建）
@@ -285,8 +310,9 @@ function createWindow() {
       mainWindow.hide();
       return;
     }
-    // 用户未开启"最小化到托盘"：关窗即退出，先销毁托盘避免应用变僵尸进程
-    if (tray) {
+    // 用户未开启"最小化到托盘"：Windows/Linux 关窗即退出，先销毁托盘避免应用变僵尸进程；
+    // macOS 关窗不退出应用，保留托盘以便随时恢复窗口
+    if (process.platform !== 'darwin' && tray) {
       tray.destroy();
       tray = null;
     }
@@ -311,7 +337,7 @@ function showOrCreateWindow() {
     mainWindow.focus();
     return mainWindow;
   }
-  createWindow();
+  createWindow({ show: true });
   return mainWindow;
 }
 
@@ -342,11 +368,18 @@ function sendTriggerCheck() {
  * - 如果图标文件不存在则静默跳过
  */
 function createTray() {
-  const iconPath = path.join(__dirname, 'build', 'icon.ico');
   try {
-    tray = new Tray(iconPath);
+    let icon = APP_ICON_PATH;
+    if (process.platform === 'darwin') {
+      // macOS 菜单栏图标使用 PNG 并缩放到 18pt，ICO 无法在 Tray 中正常显示
+      const image = nativeImage.createFromPath(APP_ICON_PATH);
+      if (!image.isEmpty()) {
+        icon = image.resize({ width: 18, height: 18 });
+      }
+    }
+    tray = new Tray(icon);
   } catch {
-    // 如果 ico 文件不存在，跳过托盘创建
+    // 图标文件不存在或平台不支持时跳过托盘创建
     return;
   }
 
@@ -479,6 +512,7 @@ if (hasSingleInstanceLock) {
 
   // Electron 就绪后创建窗口、托盘并启动后台检测
   app.whenReady().then(() => {
+    configureApplicationMenu();
     createWindow();
     createTray();
     startBackgroundCheck();
@@ -755,6 +789,15 @@ function isValidCliCommand(cmd) {
   return /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(cmd);
 }
 
+/**
+ * 校验版本参数（会被拼进 shell 命令，禁止空格与 shell 特殊字符）
+ * 允许 --version、-V、version 等常见形式
+ */
+function isValidVersionArg(arg) {
+  if (!arg || typeof arg !== 'string') return false;
+  return /^[a-zA-Z0-9._-]+$/.test(arg.replace(/^-+/, ''));
+}
+
 // PATH 刷新结果缓存有效期：注册表 PATH 只会在安装/卸载后变化，
 // 短时间内的重复刷新（如「一键更新全部」逐个工具触发）直接复用缓存
 const PATH_CACHE_TTL = 30 * 1000;
@@ -815,18 +858,45 @@ function refreshProcessPath(options = {}) {
           process.env.PATH = merged;
         }
       } else {
-        // Unix: 合并常见用户路径
+        // macOS/Linux：从 Finder/Dock/开机自启启动时不会加载 shell 配置，
+        // PATH 往往只有 /usr/bin:/bin:/usr/sbin:/sbin，导致 Homebrew/nvm 安装的 node/npm 找不到。
+        // macOS 额外读取登录 shell 的 PATH，并合并常见安装目录。
         const home = os.homedir();
         const extras = [
           path.join(home, '.local', 'bin'),
           path.join(home, '.npm-global', 'bin'),
-          '/usr/local/bin'
+          '/opt/homebrew/bin',   // Apple Silicon Homebrew
+          '/usr/local/bin'       // Intel Homebrew / 官方安装包
         ];
+        let shellPath = '';
+        if (os.platform() === 'darwin') {
+          try {
+            const shell = process.env.SHELL || '/bin/zsh';
+            const startMarker = '__CB_PATH_START__';
+            const endMarker = '__CB_PATH_END__';
+            const output = await execCommand(
+              shell,
+              ['-ilc', `printf '${startMarker}%s${endMarker}' "$PATH"`],
+              { shell: false, timeout: 5000, ignoreError: true }
+            );
+            const match = output.match(new RegExp(`${startMarker}([\\s\\S]*?)${endMarker}`));
+            if (match && match[1].trim()) shellPath = match[1].trim();
+          } catch { /* 登录 shell 读取失败时退回常见路径 */ }
+        }
         const current = process.env.PATH || '';
-        const merged = [...extras.filter(p => fs.existsSync(p) && !current.includes(p)), current]
-          .filter(Boolean)
+        const parts = [
+          ...(shellPath ? shellPath.split(path.delimiter) : []),
+          ...extras.filter(p => fs.existsSync(p)),
+          ...current.split(path.delimiter)
+        ];
+        const seen = new Set();
+        process.env.PATH = parts
+          .filter(p => {
+            if (!p || seen.has(p)) return false;
+            seen.add(p);
+            return true;
+          })
           .join(path.delimiter);
-        process.env.PATH = merged;
       }
       _pathRefreshedAt = Date.now();
     } catch {
@@ -1326,7 +1396,7 @@ function runStreamingCommand(tool, shellCmd, shellArgs, env, { action, successMs
         sendLog('success', tool.id, successMsg);
         resolve({ success: true });
       } else {
-        fail(`${action}退出码: ${code}（Windows 上可能需要以管理员身份运行）`, { code });
+        fail(`${action}退出码: ${code}${isWin ? '（Windows 上可能需要以管理员身份运行）' : '（请检查网络连接或执行权限）'}`, { code });
       }
     });
   });
@@ -1473,7 +1543,7 @@ ipcMain.handle('add-custom-tool', (event, toolConfig) => {
   if (!isValidCliCommand(cmd)) {
     return { success: false, message: 'CLI 命令名不合法（仅允许字母、数字、. _ -）' };
   }
-  if (!/^[a-zA-Z0-9._-]+$/.test(versionArg.replace(/^-+/, ''))) {
+  if (!isValidVersionArg(versionArg)) {
     return { success: false, message: '版本参数不合法' };
   }
 
@@ -1513,17 +1583,25 @@ ipcMain.handle('remove-custom-tool', (event, toolId) => {
 ipcMain.handle('check-environment', async () => {
   const result = { node: null, npm: null, os: null, errors: [] };
 
-  try {
-    const nodeOutput = await execCommand('node', ['-v'], { shell: true, timeout: 10000 });
-    result.node = nodeOutput.trim();
-  } catch {
+  // GUI 启动时继承的 PATH 可能不含 Homebrew/nvm（macOS）或注册表最新 PATH（Windows），
+  // 先刷新再检测，避免误报 Node.js / npm 未安装
+  try { await refreshProcessPath(); } catch { /* 刷新失败不阻断检测 */ }
+
+  // node / npm 并行检测：Windows 上 npm.cmd 冷启动较慢，串行会明显拖慢首屏
+  const [nodeResult, npmResult] = await Promise.allSettled([
+    execCommand('node', ['-v'], { shell: true, timeout: 10000 }),
+    execCommand('npm', ['-v'], { shell: true, timeout: 10000 })
+  ]);
+
+  if (nodeResult.status === 'fulfilled') {
+    result.node = nodeResult.value.trim();
+  } else {
     result.errors.push('未检测到 Node.js，请先安装 Node.js (https://nodejs.org)');
   }
 
-  try {
-    const npmOutput = await execCommand('npm', ['-v'], { shell: true, timeout: 10000 });
-    result.npm = npmOutput.trim();
-  } catch {
+  if (npmResult.status === 'fulfilled') {
+    result.npm = npmResult.value.trim();
+  } else {
     result.errors.push('未检测到 npm，请检查 Node.js 安装是否完整');
   }
 
@@ -1597,10 +1675,14 @@ ipcMain.handle('export-report', async (event, { text, defaultName } = {}) => {
 
 // 弹出对话框提示用户需要管理员权限（Windows 全局安装 npm 包时可能需要）
 ipcMain.handle('show-admin-tip', async () => {
+  const isWin = os.platform() === 'win32';
+  const message = isWin
+    ? '在 Windows 上全局安装 npm 包可能需要管理员权限。\n\n如果安装/更新失败，请右键点击「AI Code Tool Updater.exe」选择「以管理员身份运行」，或将 npm 全局目录配置到用户目录后重试。'
+    : '在 macOS/Linux 上全局安装 npm 包时，如果遇到 EACCES 权限错误，请不要使用 sudo 运行本应用。\n\n建议把 npm 全局目录改到用户目录（npm config set prefix ~/.npm-global），或修复全局目录权限后重试。';
   await dialog.showMessageBox(mainWindow, {
     type: 'info',
-    title: '需要管理员权限',
-    message: '在 Windows 上全局安装 npm 包可能需要管理员权限。\n\n如果安装/更新失败，请右键点击「AI Code Tool Updater.exe」选择「以管理员身份运行」，或将 npm 全局目录配置到用户目录后重试。',
+    title: isWin ? '需要管理员权限' : 'npm 权限提示',
+    message,
     buttons: ['知道了']
   });
 });
@@ -1664,15 +1746,51 @@ ipcMain.handle('save-settings', (event, input) => {
 const AGYYOLO_FUNCTION_BODY = `function agyyolo {\n    agy --dangerously-skip-permissions\n}\n`;
 
 /**
- * 获取所有可能的 PowerShell Profile 路径（兼容 Windows PowerShell 5.1 和 PowerShell 7+）
- * @returns {string[]} Profile 文件路径数组
+ * PowerShell 查询脚本：输出 $PROFILE 与「文档」已知文件夹下的 Profile 路径
+ * （已知文件夹可正确处理 OneDrive 重定向）
  */
-function getPowerShellProfiles() {
+const PROFILE_QUERY_PS = `
+$ErrorActionPreference='SilentlyContinue'
+$paths = New-Object System.Collections.Generic.List[string]
+if ($PROFILE) { $paths.Add([string]$PROFILE) }
+if ($PROFILE.CurrentUserCurrentHost) { $paths.Add($PROFILE.CurrentUserCurrentHost) }
+$docs = [Environment]::GetFolderPath('MyDocuments')
+if ($docs) {
+  $paths.Add([IO.Path]::Combine($docs,'WindowsPowerShell','Microsoft.PowerShell_profile.ps1'))
+  $paths.Add([IO.Path]::Combine($docs,'PowerShell','Microsoft.PowerShell_profile.ps1'))
+}
+[pscustomobject]@{ paths = @($paths) } | ConvertTo-Json -Compress
+`;
+
+/**
+ * 获取所有可能的 PowerShell Profile 路径
+ * - 通过 powershell.exe 读取 $PROFILE 和「文档」已知文件夹，
+ *   兼容 OneDrive 重定向（此时 %USERPROFILE%\Documents 不是真实文档目录）
+ * - 同时覆盖 Windows PowerShell 5.1 与 PowerShell 7+
+ * @returns {Promise<string[]>} Profile 文件路径数组
+ */
+async function getPowerShellProfiles() {
   const home = os.homedir();
-  return [
+  const fallback = [
     path.join(home, 'Documents', 'WindowsPowerShell', 'Microsoft.PowerShell_profile.ps1'),
     path.join(home, 'Documents', 'PowerShell', 'Microsoft.PowerShell_profile.ps1')
   ];
+  if (os.platform() !== 'win32') return fallback;
+
+  let discovered = [];
+  try {
+    const output = await execCommand(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-Command', PROFILE_QUERY_PS],
+      { shell: false, timeout: 8000 }
+    );
+    const parsed = JSON.parse(output.trim());
+    if (parsed && Array.isArray(parsed.paths)) discovered = parsed.paths;
+  } catch { /* 查询失败时退回默认路径 */ }
+
+  return [...new Set([...(discovered.length ? discovered : fallback)]
+    .filter(p => typeof p === 'string' && p.trim())
+    .map(p => p.trim()))];
 }
 
 /**
@@ -1721,6 +1839,13 @@ function installAgyyoloToProfile(profilePath) {
  * - 返回每个 Profile 的处理结果
  */
 ipcMain.handle('install-agyyolo', async () => {
+  // 该功能只写入 PowerShell Profile，仅 Windows 可用
+  if (os.platform() !== 'win32') {
+    const message = 'agyyolo 仅支持 Windows PowerShell，当前系统无需配置。';
+    sendLog('error', 'system', message);
+    return { success: false, agyFound: false, results: [], message };
+  }
+
   // 先检测 agy 是否安装
   let agyFound = false;
   try {
@@ -1740,8 +1865,9 @@ ipcMain.handle('install-agyyolo', async () => {
 
   const results = [];
   const seen = new Set(); // 去重（不同路径可能指向同一文件）
+  const profiles = await getPowerShellProfiles();
 
-  for (const profilePath of getPowerShellProfiles()) {
+  for (const profilePath of profiles) {
     const key = profilePath.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);

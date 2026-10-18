@@ -1,6 +1,9 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('electronAPI', {
+  // 当前运行平台（win32 / darwin / linux），渲染层据此隐藏平台专属功能
+  platform: process.platform,
+
   // ===== 工具管理 =====
 
   // 获取工具配置（内置 + 自定义）

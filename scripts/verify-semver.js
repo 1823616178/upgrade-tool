@@ -7,14 +7,24 @@ const path = require('path');
 const src = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
 
 // 提取顶层函数定义（以 "function name(" 开始、以行首 "}" 结束）
-for (const name of ['extractVersionNumber', 'parseSemver', 'comparePrerelease', 'compareSemver']) {
+// 注意：仅用于这个无框架的轻量测试，函数格式变化时需要同步调整
+const fnNames = [
+  'extractVersionNumber', 'parseSemver', 'comparePrerelease', 'compareSemver',
+  'isValidRegistryUrl', 'isValidNpmPackage', 'isValidCliCommand', 'isValidVersionArg'
+];
+const fnSources = [];
+for (const name of fnNames) {
   const m = src.match(new RegExp(`function ${name}\\([\\s\\S]*?\\n}`));
   if (!m) {
     console.error(`未找到函数: ${name}`);
     process.exit(1);
   }
-  eval(m[0]);
+  fnSources.push(m[0]);
 }
+// 把所有函数放进同一个函数作用域，保证 compareSemver 能访问 parseSemver 等依赖
+const fns = new Function(
+  `${fnSources.join('\n')}\nreturn { ${fnNames.map(n => `${n}: ${n}`).join(', ')} };`
+)();
 
 const cases = [
   ['1.2.3', '1.2.4', -1],
@@ -36,10 +46,33 @@ const cases = [
 
 let failed = 0;
 for (const [a, b, expected] of cases) {
-  const got = compareSemver(a, b);
+  const got = fns.compareSemver(a, b);
   const ok = got === expected;
   if (!ok) failed++;
   console.log(`${ok ? 'PASS' : 'FAIL'} compareSemver(${JSON.stringify(a)}, ${JSON.stringify(b)}) = ${got} (期望 ${expected})`);
 }
+
+// 输入校验函数：这些值会拼进 shell 命令，必须拒绝空格和特殊字符
+const validatorCases = [
+  ['isValidVersionArg', ['--version'], true],
+  ['isValidVersionArg', ['-V'], true],
+  ['isValidVersionArg', ['--'], false],
+  ['isValidVersionArg', ['--version & calc'], false],
+  ['isValidVersionArg', ['--version;rm -rf /'], false],
+  ['isValidNpmPackage', ['@scope/name'], true],
+  ['isValidNpmPackage', ['name;calc'], false],
+  ['isValidCliCommand', ['my-cli'], true],
+  ['isValidCliCommand', ['my cli'], false],
+  ['isValidRegistryUrl', ['https://registry.npmjs.org/'], true],
+  ['isValidRegistryUrl', ['javascript:alert(1)'], false],
+  ['isValidRegistryUrl', ['https://x.test/;calc'], false],
+];
+for (const [fn, args, expected] of validatorCases) {
+  const got = fns[fn](...args);
+  const ok = got === expected;
+  if (!ok) failed++;
+  console.log(`${ok ? 'PASS' : 'FAIL'} ${fn}(${args.map(a => JSON.stringify(a)).join(', ')}) = ${got} (期望 ${expected})`);
+}
+
 console.log(failed ? `${failed} 个用例失败` : '全部通过');
 process.exit(failed ? 1 : 0);
