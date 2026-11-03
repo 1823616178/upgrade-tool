@@ -892,9 +892,21 @@ async function uninstallTool(toolId) {
   // showConfirmModal 的正文走 innerHTML，工具名（可能是用户自定义）必须转义
   const safeName = escapeHtml(name);
   // 使用自定义模态框替代原生 confirm()
+  // 三类工具的卸载语义不同，确认框要说清实际会发生什么：
+  // - npm 包：移除全局安装的包
+  // - AtomCode 等保留数据的脚本安装工具：移除程序本体，保留本地数据
+  // - 其余脚本安装工具：没有自动卸载命令，只能按官方指引手动处理
+  let detail;
+  if (!tool.installScript) {
+    detail = `将卸载 <b>${safeName}</b>，其全局安装的 npm 包会被移除。`;
+  } else if (tool.uninstallKeepsData) {
+    detail = `将卸载 <b>${safeName}</b>，其本地数据（如配置与会话记录）会被保留。`;
+  } else {
+    detail = `将按官方指引卸载 <b>${safeName}</b>，本地数据默认保留。`;
+  }
   const confirmed = await showConfirmModal(
     `确定卸载 ${name}？`,
-    `将卸载 <b>${safeName}</b>，其全局安装的 npm 包会被移除。`,
+    detail,
     '卸载',
     'danger'
   );
