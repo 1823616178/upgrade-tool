@@ -82,6 +82,13 @@ try {
 // 预定义的 AI 编码工具列表，包含 CLI 命令名和对应的 npm 包名
 // updateCmd 不再硬编码，而是根据当前镜像源动态生成（见 getAllTools）
 // installScript: { win, unix } — 脚本安装类工具的安装命令（数据驱动，消除 doInstallOrUpdate 中的 if/else 链）
+// AtomCode 官方安装脚本从 AtomGit API 取版，该 API 有调用频控（超限返回错误体），
+// 一旦限流官方脚本就直接报「could not determine the latest release」装不了。
+// 这里在调官方脚本前先用同款两级来源（API → release manifest）取好版本，经 $env:ATOMCODE_VERSION 传入，
+// 官方脚本会跳过自己的取版逻辑。取不到就返回空，交回官方脚本自行检测。
+// 本函数体作为单行 PowerShell 命令注入，不要换行。
+const ATOMCODE_INSTALL_VERSION_FN = "function Get-AtomcodeInstallVersion { $ProgressPreference = 'SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; $re = '^v[0-9]+\\.[0-9]+\\.[0-9]+(-[A-Za-z0-9.-]+)?(\\+[A-Za-z0-9.-]+)?\\z'; foreach ($src in @(@{ u = 'https://api.atomgit.com/api/v5/repos/atomgit_atomcode/atomcode/releases/latest'; k = 'tag_name' }, @{ u = 'https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/latest.json'; k = 'version' })) { try { $d = Invoke-RestMethod -Uri $src.u -UseBasicParsing -TimeoutSec 10; $v = $d.($src.k); if ($v -is [string] -and $v -cmatch $re) { return $v } } catch {} }; return $null }";
+
 const BUILTIN_TOOLS = [
   { id: 'kimi',       name: 'Kimi Code',              cmd: 'kimi',       pkg: '@moonshot-ai/kimi-code',        versionArg: '--version', icon: '🌙' },
   { id: 'claude',     name: 'Claude Code',             cmd: 'claude',     pkg: '@anthropic-ai/claude-code',     versionArg: '--version', icon: '✳️' },
@@ -105,11 +112,15 @@ const BUILTIN_TOOLS = [
   {
     id: 'atomcode', name: 'AtomCode', cmd: 'atomcode', versionArg: '--version', icon: '⚛️',
     installScript: {
-      // 先终止正在运行的进程再安装，最后写 PATH
-      win:  'Write-Host \'[AtomCode] Stopping running atomcode process...\'; taskkill /f /im atomcode.exe 2>$null | Out-Null; Start-Sleep -Milliseconds 800; Import-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue; irm https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/install.ps1 | iex; $atomDir = Join-Path $env:LOCALAPPDATA \'AtomCode\'; $userPath = [Environment]::GetEnvironmentVariable(\'PATH\', \'User\'); if ($userPath -notlike "*$atomDir*") { [Environment]::SetEnvironmentVariable(\'PATH\', "$userPath;$atomDir", \'User\'); Write-Host \'[AtomCode] Added atomcode dir to user PATH\' }',
+      // 先终止正在运行的进程再安装（否则 Windows 下替换不了正在运行的 exe）；
+      // 取版用 ATOMCODE_INSTALL_VERSION_FN 预置到 ATOMCODE_VERSION，绕开官方脚本自己的单级取版（会被 API 限流打挂）；
+      // PATH 由官方 install.ps1 负责（会话内前置插入 + 用户级注册表，带规范化去重），这里不再维护副本
+      win:  'Write-Host \'[AtomCode] Stopping running atomcode process...\'; taskkill /f /im atomcode.exe 2>$null | Out-Null; Start-Sleep -Milliseconds 800; Import-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue; '
+        + ATOMCODE_INSTALL_VERSION_FN
+        + '; $env:ATOMCODE_VERSION = (Get-AtomcodeInstallVersion); irm https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/install.ps1 | iex',
       unix: 'curl -fsSL https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/install.sh | sh'
     },
-    docsUrl: 'https://atomgit.com/'
+    docsUrl: 'https://atomgit.com/atomgit_atomcode/atomcode/releases'
   },
   {
     // altCmds：主命令检测失败时依次尝试的备用命令名（旧版安装的是 qoder）
@@ -153,7 +164,7 @@ const BUILTIN_TOOLS = [
   },
 ];
 
-// 通过官方安装脚本安装的工具（用于判断是否支持自动卸载）
+// 通过官方安装脚本安装的工具（antigravity/qoder/qoder_cn/grok 无统一卸载命令；atomcode 由 doUninstall 特判自动卸载）
 // 直接从 BUILTIN_TOOLS 中提取有 installScript 的工具 ID
 const SCRIPT_INSTALLED_TOOLS = Object.fromEntries(
   BUILTIN_TOOLS
@@ -201,7 +212,7 @@ function saveCustomTools(tools) {
  * 获取所有工具（内置 + 自定义），并根据当前镜像源动态生成 updateCmd
  * updateCmd 仅对 npm 安装类工具有意义：npm install -g <pkg>@latest --registry=<当前镜像源>
  * 脚本安装类工具（有 installScript 的）由 doInstallOrUpdate 直接读 installScript 执行，
- * 不需要也不应该再拼一份 updateCmd —— 两份副本容易漂移（例如 atomcode 的 taskkill/PATH 逻辑）
+ * 不需要也不应该再拼一份 updateCmd —— 两份副本容易漂移（例如 atomcode 的 taskkill 逻辑）
  * @returns {object[]} 合并后的工具列表，每个工具附带 isCustom 和 updateCmd 字段
  */
 function getAllTools() {
@@ -1045,22 +1056,36 @@ async function checkLatestVersion(tool) {
     }
   }
 
-  // AtomCode 通过 AtomGit API 获取线上最新 release 版本
+  // AtomCode 通过 AtomGit API 获取线上最新 release 版本。
+  // API 有调用频控（超限返回错误体），失败时回退官方 release manifest —— 与官方安装脚本的两级取版逻辑一致
   if (tool.id === 'atomcode') {
-    try {
-      const res = await fetchWithTimeout('https://api.atomgit.com/api/v5/repos/atomgit_atomcode/atomcode/releases/latest', {
-        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
-      });
-      if (!res.ok) {
-        throw new Error(`HTTP error! status: ${res.status}`);
+    const sources = [
+      {
+        url: 'https://api.atomgit.com/api/v5/repos/atomgit_atomcode/atomcode/releases/latest',
+        pick: (data) => data.tag_name,
+        init: { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' } }
+      },
+      {
+        url: 'https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/latest.json',
+        pick: (data) => data.version
       }
-      const data = await res.json();
-      // Bug fix: 不再使用硬编码回退版本，API 失败时返回 null
-      if (!data.tag_name) throw new Error('API 响应中无 tag_name 字段');
-      return { latest: data.tag_name };
-    } catch (err) {
-      return { latest: null, error: err.message };
+    ];
+    const errors = [];
+    for (const { url, pick, init } of sources) {
+      try {
+        const res = await fetchWithTimeout(url, init);
+        if (!res.ok) {
+          throw new Error(`HTTP error! status: ${res.status}`);
+        }
+        const version = pick(await res.json());
+        // 版本号需可解析，避免拿到错误体/字段后误报版本
+        if (!extractVersionNumber(version)) throw new Error('响应中无有效版本号');
+        return { latest: version };
+      } catch (err) {
+        errors.push(err.message);
+      }
     }
+    return { latest: null, error: errors.join('; ') };
   }
 
   // qoder_cn 国内版：从官方 manifest 获取最新版本（binary 为 qoderclicn）
@@ -1407,7 +1432,8 @@ function runStreamingCommand(tool, shellCmd, shellArgs, env, { action, successMs
 /**
  * 执行单个工具的卸载
  * - npm 安装的工具：npm uninstall -g <pkg>
- * - 通过官方脚本安装的工具（antigravity/atomcode/qoder/qoder_cn/grok）：没有统一卸载命令，提示手动卸载
+ * - AtomCode：先跑内置 `atomcode uninstall`，失败回退官方卸载脚本，再失败才给手动指引
+ * - 其他通过官方脚本安装的工具（antigravity/qoder/qoder_cn/grok）：没有统一卸载命令，提示手动卸载
  * @param {string} toolId - 工具 ID
  * @returns {Promise<object>} { success, code?, message?, docsUrl? }
  */
@@ -1415,6 +1441,51 @@ async function doUninstall(toolId) {
   const tools = getAllTools();
   const tool = tools.find(t => t.id === toolId);
   if (!tool) throw new Error('未知工具');
+
+  // AtomCode：优先用二进制内置的 `atomcode uninstall`，失败（老版本没有该子命令 / 二进制已损坏）再跑官方卸载脚本。
+  // --keep-data 只删二进制与 PATH 注入，保留 ~/.atomcode 用户数据，与 npm 卸载不删用户数据的语义一致
+  if (tool.id === 'atomcode') {
+    sendLog('start', tool.id, `开始卸载 ${tool.name} ...`);
+    const isWin = os.platform() === 'win32';
+    // Windows：先终止正在运行的进程，避免运行中的 exe 删不掉
+    if (isWin) {
+      await execCommand('taskkill', ['/f', '/im', 'atomcode.exe'], { ignoreError: true, timeout: 5000 })
+        .catch(() => {});
+    }
+    // 与 checkLocalVersion 同款兜底：Windows 下二进制可能不在 PATH，优先全路径执行
+    const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+    const fullPath = path.join(localAppData, 'AtomCode', 'atomcode.exe');
+    const exe = (isWin && fs.existsSync(fullPath)) ? fullPath : tool.cmd;
+    const binResult = await runStreamingCommand(tool, exe, ['uninstall', '--yes', '--keep-data'], { ...process.env }, {
+      action: '卸载',
+      successMsg: `${tool.name} 已卸载（保留 ~/.atomcode 用户数据）`
+    });
+    if (binResult.success) return binResult;
+
+    // 兜底走官方卸载脚本（与官方文档给出的手动命令一致，因此失败提示里的命令一定是对的）
+    sendLog('info', tool.id, 'atomcode uninstall 不可用，改用官方卸载脚本 ...');
+    const scriptCmd = isWin
+      ? 'irm https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/uninstall.ps1 | iex'
+      : 'curl -fsSL https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/uninstall.sh | sh';
+    // PS 5.1 下 `irm ... | iex` 不能直接接参数，需用脚本块包一层才能传 -Yes / -KeepData
+    const shellCmd = isWin ? 'powershell.exe' : 'sh';
+    const shellArgs = isWin
+      ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', `& ([scriptblock]::Create((irm https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/uninstall.ps1))) -Yes -KeepData`]
+      : ['-c', scriptCmd];
+    const scriptResult = await runStreamingCommand(tool, shellCmd, shellArgs, { ...process.env }, {
+      action: '卸载',
+      successMsg: `${tool.name} 已卸载（保留 ~/.atomcode 用户数据）`
+    });
+    if (scriptResult.success) return scriptResult;
+
+    // 失败提示里给的是刚才实际跑过的官方卸载脚本，命令一定可用（官方文档也是这一条）
+    const docsUrl = SCRIPT_INSTALLED_TOOLS[tool.id].docsUrl;
+    const msg = `${tool.name} 自动卸载失败（${scriptResult.message}）。可手动执行官方卸载脚本：`
+      + (isWin ? 'PowerShell 运行 ' : '终端运行 ')
+      + `\`${scriptCmd}\``;
+    sendLog('error', tool.id, msg);
+    return { success: false, message: msg, docsUrl, manualUninstall: true };
+  }
 
   if (SCRIPT_INSTALLED_TOOLS[tool.id]) {
     const docsUrl = SCRIPT_INSTALLED_TOOLS[tool.id].docsUrl;

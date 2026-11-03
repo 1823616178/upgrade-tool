@@ -908,11 +908,15 @@ async function uninstallTool(toolId) {
     const result = await window.electronAPI.uninstallTool(toolId);
     if (!result.success) {
       appendLog('error', toolId, result.message || '卸载失败');
-      // 脚本安装类工具：引导打开官方文档
+      // 脚本安装类工具：引导打开官方文档。
+      // message 里带着实际执行过的命令，必须转义（含 `<`）后再交给 innerHTML，否则会被当成标签吞掉
       if (result.docsUrl) {
+        const detail = result.message
+          ? `<br><small style="color:var(--text-muted)">${escapeHtml(result.message)}</small>`
+          : '';
         const goDoc = await showConfirmModal(
           `${name} 需手动卸载`,
-          `${safeName} 通过官方脚本安装，无统一卸载命令。是否打开官方文档？<br><small style="color:var(--text-muted)">${escapeHtml(result.docsUrl)}</small>`,
+          `自动卸载失败，是否打开官方文档按指引手动卸载？${detail}<br><small style="color:var(--text-muted)">${escapeHtml(result.docsUrl)}</small>`,
           '打开官方文档',
           'primary'
         );
