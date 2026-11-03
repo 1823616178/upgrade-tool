@@ -15,3 +15,212 @@ $:
           type: npc:go
           options:
             model: glm-5.3-flash
+"DeepSeek 闪电":
+  issue.comment@npc:
+    default:
+      docker:
+        image: cnbcool/default-npc:latest
+      stages:
+        - name: npc go
+          type: npc:go
+          options:
+            model: deepseek-v4.1-flash
+  pull_request.comment@npc:
+    default:
+      docker:
+        image: cnbcool/default-npc:latest
+      stages:
+        - name: npc go
+          type: npc:go
+          options:
+            model: deepseek-v4.1-flash
+"智谱 GLM 5.3":
+  issue.comment@npc:
+    default:
+      docker:
+        image: cnbcool/default-npc:latest
+      stages:
+        - name: npc go
+          type: npc:go
+          options:
+            model: glm-5.3
+  pull_request.comment@npc:
+    default:
+      docker:
+        image: cnbcool/default-npc:latest
+      stages:
+        - name: npc go
+          type: npc:go
+          options:
+            model: glm-5.3
+"智谱闪电":
+  issue.comment@npc:
+    default:
+      docker:
+        image: cnbcool/default-npc:latest
+      stages:
+        - name: npc go
+          type: npc:go
+          options:
+            model: glm-5.3-flash
+  pull_request.comment@npc:
+    default:
+      docker:
+        image: cnbcool/default-npc:latest
+      stages:
+        - name: npc go
+          type: npc:go
+          options:
+            model: glm-5.3-flash
+"智谱特快":
+  issue.comment@npc:
+    default:
+      docker:
+        image: cnbcool/default-npc:latest
+      stages:
+        - name: npc go
+          type: npc:go
+          options:
+            model: glm-5.3-flashx
+  pull_request.comment@npc:
+    default:
+      docker:
+        image: cnbcool/default-npc:latest
+      stages:
+        - name: npc go
+          type: npc:go
+          options:
+            model: glm-5.3-flashx
+"太空兔":
+  issue.comment@npc:
+    default:
+      docker:
+        image: cnbcool/default-npc:latest
+      stages:
+        - name: npc go
+          type: npc:go
+          options:
+            model: space-bunny
+  pull_request.comment@npc:
+    default:
+      docker:
+        image: cnbcool/default-npc:latest
+      stages:
+        - name: npc go
+          type: npc:go
+          options:
+            model: space-bunny
+"阶跃 Step 预览":
+  issue.comment@npc:
+    default:
+      docker:
+        image: cnbcool/default-npc:latest
+      stages:
+        - name: npc go
+          type: npc:go
+          options:
+            model: step-5-preview
+  pull_request.comment@npc:
+    default:
+      docker:
+        image: cnbcool/default-npc:latest
+      stages:
+        - name: npc go
+          type: npc:go
+          options:
+            model: step-5-preview
+"小米 MiMo Pro":
+  issue.comment@npc:
+    default:
+      docker:
+        image: cnbcool/default-npc:latest
+      stages:
+        - name: npc go
+          type: npc:go
+          options:
+            model: mimo-v2.6-pro
+  pull_request.comment@npc:
+    default:
+      docker:
+        image: cnbcool/default-npc:latest
+      stages:
+        - name: npc go
+          type: npc:go
+          options:
+            model: mimo-v2.6-pro
+"MiniMax M3.1 闪":
+  issue.comment@npc:
+    default:
+      docker:
+        image: cnbcool/default-npc:latest
+      stages:
+        - name: npc go
+          type: npc:go
+          options:
+            model: minimax-m3.1-flash
+  pull_request.comment@npc:
+    default:
+      docker:
+        image: cnbcool/default-npc:latest
+      stages:
+        - name: npc go
+          type: npc:go
+          options:
+            model: minimax-m3.1-flash
+"Kimi K3.1 Pro":
+  issue.comment@npc:
+    default:
+      docker:
+        image: cnbcool/default-npc:latest
+      stages:
+        - name: npc go
+          type: npc:go
+          options:
+            model: kimi-k3.1-pro
+  pull_request.comment@npc:
+    default:
+      docker:
+        image: cnbcool/default-npc:latest
+      stages:
+        - name: npc go
+          type: npc:go
+          options:
+            model: kimi-k3.1-pro
+"Kimi 特快":
+  issue.comment@npc:
+    default:
+      docker:
+        image: cnbcool/default-npc:latest
+      stages:
+        - name: npc go
+          type: npc:go
+          options:
+            model: kimi-k3.1-pro-highspeed
+  pull_request.comment@npc:
+    default:
+      docker:
+        image: cnbcool/default-npc:latest
+      stages:
+        - name: npc go
+          type: npc:go
+          options:
+            model: kimi-k3.1-pro-highspeed
+"混元 Hy4 预览":
+  issue.comment@npc:
+    default:
+      docker:
+        image: cnbcool/default-npc:latest
+      stages:
+        - name: npc go
+          type: npc:go
+          options:
+            model: hy4-preview
+  pull_request.comment@npc:
+    default:
+      docker:
+        image: cnbcool/default-npc:latest
+      stages:
+        - name: npc go
+          type: npc:go
+          options:
+            model: hy4-preview
