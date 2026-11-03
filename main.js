@@ -1462,15 +1462,18 @@ async function doUninstall(toolId) {
     });
     if (binResult.success) return binResult;
 
-    // 兜底走官方卸载脚本（与官方文档给出的手动命令一致，因此失败提示里的命令一定是对的）
+    // 兜底走官方卸载脚本。必须显式传 --keep-data / -KeepData：
+    // 无 flag 时脚本在非 TTY 下直接拒绝执行（自动兜底必失败），TTY 下交互默认又会删 ~/.atomcode 的本地状态，
+    // 与「保留用户数据」的承诺不符。命令只维护这一份，自动执行与失败提示共用，避免漂移
     sendLog('info', tool.id, 'atomcode uninstall 不可用，改用官方卸载脚本 ...');
+    // PS 5.1 下 `irm ... | iex` 不能直接接参数，需用脚本块包一层才能传 -Yes / -KeepData；
+    // sh 用 `sh -s --` 把参数透传给脚本
     const scriptCmd = isWin
-      ? 'irm https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/uninstall.ps1 | iex'
-      : 'curl -fsSL https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/uninstall.sh | sh';
-    // PS 5.1 下 `irm ... | iex` 不能直接接参数，需用脚本块包一层才能传 -Yes / -KeepData
+      ? '& ([scriptblock]::Create((irm https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/uninstall.ps1))) -Yes -KeepData'
+      : 'curl -fsSL https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/uninstall.sh | sh -s -- --yes --keep-data';
     const shellCmd = isWin ? 'powershell.exe' : 'sh';
     const shellArgs = isWin
-      ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', `& ([scriptblock]::Create((irm https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/uninstall.ps1))) -Yes -KeepData`]
+      ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', scriptCmd]
       : ['-c', scriptCmd];
     const scriptResult = await runStreamingCommand(tool, shellCmd, shellArgs, { ...process.env }, {
       action: '卸载',
@@ -1478,7 +1481,7 @@ async function doUninstall(toolId) {
     });
     if (scriptResult.success) return scriptResult;
 
-    // 失败提示里给的是刚才实际跑过的官方卸载脚本，命令一定可用（官方文档也是这一条）
+    // 失败提示里给的就是刚才实际跑过的那条官方卸载脚本命令（含 --keep-data），语义与自动卸载一致
     const docsUrl = SCRIPT_INSTALLED_TOOLS[tool.id].docsUrl;
     const msg = `${tool.name} 自动卸载失败（${scriptResult.message}）。可手动执行官方卸载脚本：`
       + (isWin ? 'PowerShell 运行 ' : '终端运行 ')
