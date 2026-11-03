@@ -82,12 +82,6 @@ try {
 // 预定义的 AI 编码工具列表，包含 CLI 命令名和对应的 npm 包名
 // updateCmd 不再硬编码，而是根据当前镜像源动态生成（见 getAllTools）
 // installScript: { win, unix } — 脚本安装类工具的安装命令（数据驱动，消除 doInstallOrUpdate 中的 if/else 链）
-// AtomCode 官方安装脚本从 AtomGit API 取版，该 API 有调用频控（超限返回错误体），
-// 一旦限流官方脚本就直接报「could not determine the latest release」装不了。
-// 这里在调官方脚本前先用同款两级来源（API → release manifest）取好版本，经 $env:ATOMCODE_VERSION 传入，
-// 官方脚本会跳过自己的取版逻辑。取不到就返回空，交回官方脚本自行检测。
-// 本函数体作为单行 PowerShell 命令注入，不要换行。
-const ATOMCODE_INSTALL_VERSION_FN = "function Get-AtomcodeInstallVersion { $ProgressPreference = 'SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; $re = '^v[0-9]+\\.[0-9]+\\.[0-9]+(-[A-Za-z0-9.-]+)?(\\+[A-Za-z0-9.-]+)?\\z'; foreach ($src in @(@{ u = 'https://api.atomgit.com/api/v5/repos/atomgit_atomcode/atomcode/releases/latest'; k = 'tag_name' }, @{ u = 'https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/latest.json'; k = 'version' })) { try { $d = Invoke-RestMethod -Uri $src.u -UseBasicParsing -TimeoutSec 10; $v = $d.($src.k); if ($v -is [string] -and $v -cmatch $re) { return $v } } catch {} }; return $null }";
 
 const BUILTIN_TOOLS = [
   { id: 'kimi',       name: 'Kimi Code',              cmd: 'kimi',       pkg: '@moonshot-ai/kimi-code',        versionArg: '--version', icon: '🌙' },
@@ -111,13 +105,15 @@ const BUILTIN_TOOLS = [
   },
   {
     id: 'atomcode', name: 'AtomCode', cmd: 'atomcode', versionArg: '--version', icon: '⚛️',
+    // 卸载时保留 ~/.atomcode 用户数据（与 npm 卸载不删用户数据的语义一致），渲染层据此提示
+    uninstallKeepsData: true,
     installScript: {
       // 先终止正在运行的进程再安装（否则 Windows 下替换不了正在运行的 exe）；
-      // 取版用 ATOMCODE_INSTALL_VERSION_FN 预置到 ATOMCODE_VERSION，绕开官方脚本自己的单级取版（会被 API 限流打挂）；
+      // 取版交给官方脚本：它自带 API → release manifest 两级回退，限流时不会直接失败；
       // PATH 由官方 install.ps1 负责（会话内前置插入 + 用户级注册表，带规范化去重），这里不再维护副本
-      win:  'Write-Host \'[AtomCode] Stopping running atomcode process...\'; taskkill /f /im atomcode.exe 2>$null | Out-Null; Start-Sleep -Milliseconds 800; Import-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue; '
-        + ATOMCODE_INSTALL_VERSION_FN
-        + '; $env:ATOMCODE_VERSION = (Get-AtomcodeInstallVersion); irm https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/install.ps1 | iex',
+      // irm 用全名并带 -UseBasicParsing：PS 5.1 下别名 irm 会走 IE 解析引擎，未初始化的机器上会失败；
+      // 显式启用 TLS 1.2（官方 install.ps1 内部也会设一次，但那是脚本下载之后的事）
+      win:  'Write-Host \'[AtomCode] Stopping running atomcode process...\'; taskkill /f /im atomcode.exe 2>$null | Out-Null; Start-Sleep -Milliseconds 800; Import-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue; [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-RestMethod -Uri https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/install.ps1 -UseBasicParsing | iex',
       unix: 'curl -fsSL https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/install.sh | sh'
     },
     docsUrl: 'https://atomgit.com/atomgit_atomcode/atomcode/releases'
@@ -1057,7 +1053,7 @@ async function checkLatestVersion(tool) {
   }
 
   // AtomCode 通过 AtomGit API 获取线上最新 release 版本。
-  // API 有调用频控（超限返回错误体），失败时回退官方 release manifest —— 与官方安装脚本的两级取版逻辑一致
+  // 失败时回退官方 release manifest —— 与官方安装脚本（install.sh / install.ps1）的两级取版逻辑一致
   if (tool.id === 'atomcode') {
     const sources = [
       {
@@ -1430,6 +1426,47 @@ function runStreamingCommand(tool, shellCmd, shellArgs, env, { action, successMs
 // ===== 卸载执行 =====
 
 /**
+ * 查找本机仍存在的 AtomCode 二进制
+ * 官方卸载脚本在找不到二进制时依然打印 "uninstall complete." 并以 0 退出，
+ * 卸载后需要回查一遍才能判断是否真的卸干净。
+ * 查找范围与官方卸载脚本保持一致（PATH + 官方默认安装目录），
+ * 外加卸载前已定位到的路径 —— 比脚本更准，能覆盖脚本漏掉的 Windows 用户目录。
+ * @param {string[]} [knownPaths] - 卸载前已知的二进制路径（最准确，优先检查）
+ * @returns {Promise<string|null>} 仍存在的二进制路径；没有则返回 null
+ */
+async function findAtomcodeBinary(knownPaths = []) {
+  const isWin = os.platform() === 'win32';
+  const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+  const candidates = [
+    ...knownPaths,
+    ...(isWin
+      ? [
+          path.join(localAppData, 'AtomCode', 'atomcode.exe'),
+          path.join(process.env.USERPROFILE || os.homedir(), '.local', 'bin', 'atomcode.exe')
+        ]
+      : [
+          '/usr/local/bin/atomcode',
+          path.join(os.homedir(), '.local', 'bin', 'atomcode')
+        ])
+  ];
+  for (const p of candidates) {
+    if (!p) continue;
+    try {
+      if (fs.existsSync(p) && fs.statSync(p).isFile()) return p;
+    } catch { /* 无权限的路径直接跳过 */ }
+  }
+  // 再扫一遍 PATH 里的各个目录（不 spawn 子进程，避免 shell 拼接带来的告警）
+  const dirs = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
+  for (const dir of dirs) {
+    const p = path.join(dir, isWin ? 'atomcode.exe' : 'atomcode');
+    try {
+      if (fs.existsSync(p) && fs.statSync(p).isFile()) return p;
+    } catch { /* 无权限的目录直接跳过 */ }
+  }
+  return null;
+}
+
+/**
  * 执行单个工具的卸载
  * - npm 安装的工具：npm uninstall -g <pkg>
  * - AtomCode：先跑内置 `atomcode uninstall`，失败回退官方卸载脚本，再失败才给手动指引
@@ -1456,20 +1493,33 @@ async function doUninstall(toolId) {
     const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
     const fullPath = path.join(localAppData, 'AtomCode', 'atomcode.exe');
     const exe = (isWin && fs.existsSync(fullPath)) ? fullPath : tool.cmd;
+    // 卸载前先定位二进制在哪：官方卸载脚本只认 PATH 和几个默认目录，
+    // 它找不到时会打印 "uninstall complete." 并以 0 退出（实测复现），不能当成功
+    const binPath = await findAtomcodeBinary();
     const binResult = await runStreamingCommand(tool, exe, ['uninstall', '--yes', '--keep-data'], { ...process.env }, {
       action: '卸载',
       successMsg: `${tool.name} 已卸载（保留 ~/.atomcode 用户数据）`
     });
-    if (binResult.success) return binResult;
+    if (binResult.success) {
+      // 二进制内置卸载会自己删掉自己，回查确认它确实没了
+      const left = await findAtomcodeBinary([binPath]);
+      if (!left) return binResult;
+      const leftMsg = `${tool.name} 卸载后二进制仍存在（${left}），请手动删除该文件，并从 PATH 中移除对应目录。`;
+      sendLog('error', tool.id, leftMsg);
+      return { success: false, message: leftMsg, docsUrl: SCRIPT_INSTALLED_TOOLS[tool.id].docsUrl, manualUninstall: true };
+    }
 
     // 兜底走官方卸载脚本。必须显式传 --keep-data / -KeepData：
     // 无 flag 时脚本在非 TTY 下直接拒绝执行（自动兜底必失败），TTY 下交互默认又会删 ~/.atomcode 的本地状态，
     // 与「保留用户数据」的承诺不符。命令只维护这一份，自动执行与失败提示共用，避免漂移
     sendLog('info', tool.id, 'atomcode uninstall 不可用，改用官方卸载脚本 ...');
     // PS 5.1 下 `irm ... | iex` 不能直接接参数，需用脚本块包一层才能传 -Yes / -KeepData；
-    // sh 用 `sh -s --` 把参数透传给脚本
+    // sh 用 `sh -s --` 把参数透传给脚本。
+    // Windows 分支补两处 PS 5.1 兼容处理（官方 install.ps1 里也有同样写法）：
+    // 显式启用 TLS 1.2（PS 5.1 默认协议集可能不含它），并给 irm 加 -UseBasicParsing
+    // （否则会走 IE 解析引擎，在 IE 未完成初始化的机器上会失败）
     const scriptCmd = isWin
-      ? '& ([scriptblock]::Create((irm https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/uninstall.ps1))) -Yes -KeepData'
+      ? '[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; & ([scriptblock]::Create((Invoke-RestMethod -Uri https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/uninstall.ps1 -UseBasicParsing))) -Yes -KeepData'
       : 'curl -fsSL https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/uninstall.sh | sh -s -- --yes --keep-data';
     const shellCmd = isWin ? 'powershell.exe' : 'sh';
     const shellArgs = isWin
@@ -1479,7 +1529,16 @@ async function doUninstall(toolId) {
       action: '卸载',
       successMsg: `${tool.name} 已卸载（保留 ~/.atomcode 用户数据）`
     });
-    if (scriptResult.success) return scriptResult;
+    if (scriptResult.success) {
+      // 官方脚本找不到二进制时依然打印 "uninstall complete." 并以 0 退出，
+      // 直接当成功会误报「已卸载」。这里回查二进制是否真的消失了。
+      const stillThere = await findAtomcodeBinary([binPath]);
+      if (!stillThere) return scriptResult;
+      const leftMsg = `${tool.name} 卸载脚本执行完毕，但二进制仍存在（${stillThere}），可能装在脚本未覆盖的位置。`
+        + '请手动删除该文件，并从 PATH 中移除对应目录。';
+      sendLog('error', tool.id, leftMsg);
+      return { success: false, message: leftMsg, docsUrl: SCRIPT_INSTALLED_TOOLS[tool.id].docsUrl, manualUninstall: true };
+    }
 
     // 失败提示里给的就是刚才实际跑过的那条官方卸载脚本命令（含 --keep-data），语义与自动卸载一致
     const docsUrl = SCRIPT_INSTALLED_TOOLS[tool.id].docsUrl;
