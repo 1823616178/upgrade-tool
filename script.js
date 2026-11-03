@@ -912,7 +912,7 @@ async function uninstallTool(toolId) {
       if (result.docsUrl) {
         const goDoc = await showConfirmModal(
           `${name} 需手动卸载`,
-          `${safeName} 通过官方脚本安装，无统一卸载命令。是否打开官方文档？<br><small style="color:var(--text-muted)">${escapeHtml(result.docsUrl)}</small>`,
+          `自动卸载失败，是否打开官方文档按指引手动卸载？<br><small style="color:var(--text-muted)">${escapeHtml(result.docsUrl)}</small>`,
           '打开官方文档',
           'primary'
         );
