@@ -64,6 +64,9 @@ const validatorCases = [
   ['isValidCliCommand', ['my-cli'], true],
   ['isValidCliCommand', ['my cli'], false],
   ['isValidRegistryUrl', ['https://registry.npmjs.org/'], true],
+  ['isValidRegistryUrl', ['http://registry.npmjs.org/'], false],
+  ['isValidRegistryUrl', ['https://user:pass@registry.npmjs.org/'], false],
+  ['isValidRegistryUrl', ['https://registry.npmjs.org/?token=x'], false],
   ['isValidRegistryUrl', ['javascript:alert(1)'], false],
   ['isValidRegistryUrl', ['https://x.test/;calc'], false],
 ];

@@ -5,6 +5,7 @@ const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
 const os = require('os');
+const { pathToFileURL } = require('url');
 
 // 全局只允许一个应用实例。后续启动的实例会立即退出，并通知首个实例唤醒主窗口。
 // 必须在 app ready 之前申请锁，避免两个进程同时创建窗口、托盘和后台任务。
@@ -80,8 +81,8 @@ try {
 
 // ===== 内置工具配置 =====
 // 预定义的 AI 编码工具列表，包含 CLI 命令名和对应的 npm 包名
-// updateCmd 不再硬编码，而是根据当前镜像源动态生成（见 getAllTools）
-// installScript: { win, unix } — 脚本安装类工具的安装命令（数据驱动，消除 doInstallOrUpdate 中的 if/else 链）
+// npm 更新只在解析出精确版本后即时构造，避免使用可变的 latest 标签
+// installScript: { winUrl, unixUrl } — 只存 HTTPS 脚本地址，不在这里保存管道执行命令
 
 const BUILTIN_TOOLS = [
   { id: 'kimi',       name: 'Kimi Code',              cmd: 'kimi',       pkg: '@moonshot-ai/kimi-code',        versionArg: '--version', icon: '🌙' },
@@ -98,8 +99,9 @@ const BUILTIN_TOOLS = [
     // antigravity 使用独立的安装脚本；已安装时改用 agy update（在 doInstallOrUpdate 中特判）
     id: 'antigravity', name: 'Antigravity CLI', cmd: 'agy', versionArg: '--version', icon: '🪐',
     installScript: {
-      win:  'Import-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue; irm https://antigravity.google/cli/install.ps1 | iex',
-      unix: 'curl -sSL https://antigravity.google/cli/install.sh | bash'
+      winUrl: 'https://antigravity.google/cli/install.ps1',
+      unixUrl: 'https://antigravity.google/cli/install.sh',
+      unixShell: 'bash'
     },
     docsUrl: 'https://antigravity.google/'
   },
@@ -108,13 +110,9 @@ const BUILTIN_TOOLS = [
     // 卸载时保留 ~/.atomcode 用户数据（与 npm 卸载不删用户数据的语义一致），渲染层据此提示
     uninstallKeepsData: true,
     installScript: {
-      // 先终止正在运行的进程再安装（否则 Windows 下替换不了正在运行的 exe）；
-      // 取版交给官方脚本：它自带 API → release manifest 两级回退，限流时不会直接失败；
-      // PATH 由官方 install.ps1 负责（会话内前置插入 + 用户级注册表，带规范化去重），这里不再维护副本
-      // irm 用全名并带 -UseBasicParsing：PS 5.1 下别名 irm 会走 IE 解析引擎，未初始化的机器上会失败；
-      // 显式启用 TLS 1.2（官方 install.ps1 内部也会设一次，但那是脚本下载之后的事）
-      win:  'Write-Host \'[AtomCode] Stopping running atomcode process...\'; taskkill /f /im atomcode.exe 2>$null | Out-Null; Start-Sleep -Milliseconds 800; Import-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue; [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-RestMethod -Uri https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/install.ps1 -UseBasicParsing | iex',
-      unix: 'curl -fsSL https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/install.sh | sh'
+      winUrl: 'https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/install.ps1',
+      unixUrl: 'https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/install.sh',
+      unixShell: 'sh'
     },
     docsUrl: 'https://atomgit.com/atomgit_atomcode/atomcode/releases'
   },
@@ -122,8 +120,9 @@ const BUILTIN_TOOLS = [
     // altCmds：主命令检测失败时依次尝试的备用命令名（旧版安装的是 qoder）
     id: 'qoder', name: 'Qoder CLI', cmd: 'qodercli', altCmds: ['qoder'], pkg: '@qoder-ai/qodercli', versionArg: '--version', icon: '🚀',
     installScript: {
-      win:  'Import-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue; irm https://qoder.com/install.ps1 | iex',
-      unix: 'curl -fsSL https://qoder.com/install | bash'
+      winUrl: 'https://qoder.com/install.ps1',
+      unixUrl: 'https://qoder.com/install',
+      unixShell: 'bash'
     },
     docsUrl: 'https://qoder.com/'
   },
@@ -131,8 +130,9 @@ const BUILTIN_TOOLS = [
     // qoder_cn 安装的是 qoderclicn 命令，与国际版 qodercli 不同
     id: 'qoder_cn', name: 'Qoder CLI (国内镜像)', cmd: 'qoderclicn', versionArg: '--version', icon: '🐉',
     installScript: {
-      win:  'Import-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue; irm https://qoder.com.cn/install.ps1 | iex',
-      unix: 'curl -fsSL https://qoder.com.cn/install | bash'
+      winUrl: 'https://qoder.com.cn/install.ps1',
+      unixUrl: 'https://qoder.com.cn/install',
+      unixShell: 'bash'
     },
     docsUrl: 'https://qoder.com.cn/'
   },
@@ -140,8 +140,9 @@ const BUILTIN_TOOLS = [
     // grok 使用 xAI 官方安装脚本，不通过 npm 安装
     id: 'grok', name: 'Grok CLI', cmd: 'grok', versionArg: '--version', icon: '🛸',
     installScript: {
-      win:  'Import-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue; irm https://x.ai/cli/install.ps1 | iex',
-      unix: 'curl -fsSL https://x.ai/cli/install | bash'
+      winUrl: 'https://x.ai/cli/install.ps1',
+      unixUrl: 'https://x.ai/cli/install',
+      unixShell: 'bash'
     },
     docsUrl: 'https://x.ai/'
   },
@@ -153,8 +154,9 @@ const BUILTIN_TOOLS = [
     id: 'muse', name: 'Muse CLI', cmd: 'muse', versionArg: '--version', icon: '🎭',
     checkEnv: { MUSE_NO_AUTO_UPDATE: '1' },
     installScript: {
-      win:  'Import-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue; irm https://dev.meta.ai/install.ps1 | iex',
-      unix: 'curl -fsSL https://dev.meta.ai/install.sh | bash'
+      winUrl: 'https://dev.meta.ai/install.ps1',
+      unixUrl: 'https://dev.meta.ai/install.sh',
+      unixShell: 'bash'
     },
     docsUrl: 'https://dev.meta.ai/'
   },
@@ -187,10 +189,21 @@ function loadCustomTools() {
   try {
     const data = JSON.parse(fs.readFileSync(getCustomToolsPath(), 'utf-8'));
     if (!Array.isArray(data)) return [];
-    // 包名 / 命令名 / 版本参数会被拼进 shell 命令，文件可能被手工改过，加载时再校验一次（校验函数为函数声明，已提升）
+    // 文件可被手工编辑，只允许保留显式描述字段；未知或执行字段会使记录被拒绝。
     return data
-      .filter(t => t && t.id && isValidNpmPackage(t.pkg) && isValidCliCommand(t.cmd) && isValidVersionArg(t.versionArg || '--version'))
-      .map(t => ({ ...t, versionArg: t.versionArg || '--version' }));
+      .filter(t => hasOnlyFields(t, ['id', 'name', 'cmd', 'pkg', 'versionArg'])
+        && /^custom_\d+$/.test(t.id)
+        && isValidToolName(t.name)
+        && isValidNpmPackage(t.pkg)
+        && isValidCliCommand(t.cmd)
+        && isValidVersionArg(t.versionArg || '--version'))
+      .map(t => ({
+        id: t.id,
+        name: t.name.trim(),
+        cmd: t.cmd.trim(),
+        pkg: t.pkg.trim(),
+        versionArg: (t.versionArg || '--version').trim()
+      }));
   } catch {
     return [];
   }
@@ -205,11 +218,10 @@ function saveCustomTools(tools) {
 }
 
 /**
- * 获取所有工具（内置 + 自定义），并根据当前镜像源动态生成 updateCmd
- * updateCmd 仅对 npm 安装类工具有意义：npm install -g <pkg>@latest --registry=<当前镜像源>
+ * 获取所有工具（内置 + 自定义）；npm 安装命令仅在取得精确版本后构造
  * 脚本安装类工具（有 installScript 的）由 doInstallOrUpdate 直接读 installScript 执行，
- * 不需要也不应该再拼一份 updateCmd —— 两份副本容易漂移（例如 atomcode 的 taskkill 逻辑）
- * @returns {object[]} 合并后的工具列表，每个工具附带 isCustom 和 updateCmd 字段
+ * 安装脚本只有 URL 元数据，不需要派生 updateCmd —— 避免脚本与 npm 命令混淆
+ * @returns {object[]} 合并后的工具列表，每个工具附带 isCustom 字段
  */
 function getAllTools() {
   const custom = loadCustomTools();
@@ -221,10 +233,6 @@ function getAllTools() {
     ...t,
     // 是否支持当前平台（未声明 platforms 的工具视为全平台支持）
     supported: !t.platforms || t.platforms.includes(os.platform()),
-    // 脚本安装类工具走 installScript，updateCmd 留空
-    updateCmd: (!t.installScript && t.pkg)
-      ? `npm install -g ${t.pkg}@latest --registry=${currentRegistry}`
-      : '',
     // 脚本安装工具附带官网链接（渲染层 changelog 入口）；npm 工具由渲染层用 pkg 拼 npmjs 链接
     docsUrl: SCRIPT_INSTALLED_TOOLS[t.id] ? SCRIPT_INSTALLED_TOOLS[t.id].docsUrl : null
   }));
@@ -235,6 +243,9 @@ let mainWindow = null;    // 主窗口实例
 let tray = null;          // 系统托盘实例
 let backgroundTimer = null; // 后台版本检测定时器引用
 let isQuitting = false;   // 应用正在退出（Cmd+Q / 系统关机等），此时关窗不再拦截为最小化到托盘
+let activeCheckRunId = 0;
+let lastCheckBatchAt = 0;
+const CHECK_BATCH_MIN_INTERVAL_MS = 1000;
 
 // 应用图标：Windows 用 ICO，macOS/Linux 用 PNG（macOS 的 Tray 不支持 ICO）
 const APP_ICON_PATH = process.platform === 'win32'
@@ -277,6 +288,8 @@ function createWindow(options = {}) {
     webPreferences: {
       nodeIntegration: false,    // 禁止渲染进程直接访问 Node.js
       contextIsolation: true,    // 隔离 preload 和渲染进程上下文
+      sandbox: true,             // preload/renderer 使用 Electron sandbox
+      webSecurity: true,
       preload: path.join(__dirname, 'preload.js')
     },
     titleBarStyle: 'default',
@@ -449,7 +462,7 @@ function startBackgroundCheck() {
       await refreshProcessPath();
       const tools = getAllTools();
       // 后台定时检测静默执行（不刷日志窗口），仅在有更新时弹系统通知
-      const results = await Promise.all(tools.map(t => checkTool(t, { silent: true })));
+      const results = await Promise.all(tools.map(t => runLimitedCheck(() => checkToolSafely(t, { silent: true }))));
       const updatable = results.filter(r => r.needsUpdate);
       if (updatable.length > 0) {
         const names = updatable.map(t => t.name).join('、');
@@ -584,7 +597,8 @@ function fetchWithTimeout(url, options = {}, timeoutMs = HTTP_TIMEOUT) {
  * @param {import('child_process').ChildProcess} child
  */
 function killProcessTree(child) {
-  if (!child || child.exitCode !== null || !child.pid) return;
+  // 组长可能已退出但留下后代，因此不能以 exitCode 判断整个进程组是否已结束。
+  if (!child || !child.pid) return;
   if (os.platform() === 'win32') {
     try {
       spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
@@ -593,7 +607,19 @@ function killProcessTree(child) {
       try { child.kill(); } catch { /* ignore */ }
     }
   } else {
-    try { child.kill(); } catch { /* ignore */ }
+    try {
+      // POSIX 子进程以 detached 模式创建，PID 同时是独立进程组 ID。
+      process.kill(-child.pid, 'SIGTERM');
+      const forceKill = setTimeout(() => {
+        try {
+          process.kill(-child.pid, 0);
+          process.kill(-child.pid, 'SIGKILL');
+        } catch { /* 进程组已退出 */ }
+      }, 1000);
+      if (forceKill.unref) forceKill.unref();
+    } catch {
+      try { child.kill('SIGTERM'); } catch { /* ignore */ }
+    }
   }
 }
 
@@ -616,7 +642,12 @@ function execCommand(command, args = [], options = {}) {
       // Windows 下通过 cmd.exe 执行，支持 .bat/.cmd 等
       child = spawn('cmd.exe', ['/c', command, ...args], { env, windowsHide: true });
     } else {
-      child = spawn(command, args, { env, shell: options.shell || false, windowsHide: true });
+      child = spawn(command, args, {
+        env,
+        shell: options.shell || false,
+        windowsHide: true,
+        detached: !isWin
+      });
     }
 
     let stdout = '';
@@ -764,7 +795,7 @@ function isRemoteNewer(localVersion, remoteVersion) {
 }
 
 /**
- * 校验 npm 镜像源 URL（仅允许 http/https）
+ * 校验 npm 镜像源 URL（仅允许 HTTPS）
  * 镜像源会被拼进 cmd.exe / sh -c 执行的命令串，必须拒绝 shell 特殊字符防止命令注入
  */
 function isValidRegistryUrl(url) {
@@ -772,7 +803,11 @@ function isValidRegistryUrl(url) {
   if (/[\s;&|`$<>(){}\\'"!^%*]/.test(url.trim())) return false;
   try {
     const parsed = new URL(url.trim());
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+    return parsed.protocol === 'https:'
+      && !parsed.username
+      && !parsed.password
+      && !parsed.search
+      && !parsed.hash;
   } catch {
     return false;
   }
@@ -786,6 +821,23 @@ function isValidNpmPackage(pkg) {
   if (/[\s;&|`$<>(){}[\]\\'"!]/.test(pkg)) return false;
   // 支持 @scope/name 或 name
   return /^(@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/i.test(pkg);
+}
+
+function isPlainObject(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+function hasOnlyFields(value, allowedFields) {
+  return isPlainObject(value) && Object.keys(value).every(key => allowedFields.includes(key));
+}
+
+function isValidToolName(name) {
+  return typeof name === 'string'
+    && name.trim().length > 0
+    && name.trim().length <= 80
+    && !/[\u0000-\u001f\u007f]/.test(name);
 }
 
 /**
@@ -1257,6 +1309,57 @@ async function checkTool(tool, options = {}) {
   return result;
 }
 
+// 跨 IPC 与后台检查共享并发上限，避免一次批量操作同时启动所有本地命令和网络请求。
+function createConcurrencyLimiter(limit) {
+  let active = 0;
+  const queue = [];
+  const drain = () => {
+    while (active < limit && queue.length) {
+      const job = queue.shift();
+      active++;
+      Promise.resolve().then(job.task).then(job.resolve, job.reject).finally(() => {
+        active--;
+        drain();
+      });
+    }
+  };
+  return (task) => new Promise((resolve, reject) => {
+    queue.push({ task, resolve, reject });
+    drain();
+  });
+}
+
+const runLimitedCheck = createConcurrencyLimiter(4);
+
+async function checkToolSafely(tool, options = {}) {
+  try {
+    return await checkTool(tool, options);
+  } catch (err) {
+    return {
+      ...tool,
+      installed: false,
+      currentVersion: null,
+      latestVersion: null,
+      notFound: false,
+      error: err && err.message ? err.message : String(err),
+      needsUpdate: false,
+      isAhead: false
+    };
+  }
+}
+
+function isCurrentCheckRun(runId, activeRunId) {
+  return runId === activeRunId;
+}
+
+function beginCheckRun() {
+  const runId = ++activeCheckRunId;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('check-run-started', runId);
+  }
+  return runId;
+}
+
 // ===== 安装/更新执行 =====
 
 /**
@@ -1280,7 +1383,7 @@ async function doInstallOrUpdate(toolId) {
   }
 
   // 无安装脚本且无 npm 包名：无法安装
-  if (!tool.installScript && !tool.pkg && !tool.updateCmd) {
+  if (!tool.installScript && !tool.pkg) {
     sendLog('error', toolId, `${tool.name} 缺少安装命令（未配置 npm 包名或安装脚本）`);
     return { success: false, message: '缺少安装命令' };
   }
@@ -1291,45 +1394,54 @@ async function doInstallOrUpdate(toolId) {
   let shellCmd;
   let shellArgs;
 
-  // ===== 数据驱动：脚本安装类工具 =====
+  // ===== HTTPS 厂商脚本：先完整下载到受限临时文件，再由本地解释器执行 =====
   if (tool.installScript) {
-    let powershellCmd = 'powershell.exe';
-    if (isWin) {
-      const sysnative = path.join(process.env.WINDIR || 'C:\\Windows', 'sysnative', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-      const system32  = path.join(process.env.WINDIR || 'C:\\Windows', 'System32',  'WindowsPowerShell', 'v1.0', 'powershell.exe');
-      if (fs.existsSync(sysnative))      powershellCmd = sysnative;
-      else if (fs.existsSync(system32))  powershellCmd = system32;
-    }
-
     if (tool.id === 'antigravity') {
-      // antigravity 已安装时使用内置 update 子命令，未安装时走官方脚本
+      // antigravity 已安装时使用内置 update 子命令，避免重新执行安装脚本。
       const localStatus = await checkLocalVersion(tool);
       if (localStatus.installed) {
-        shellCmd = isWin ? 'cmd.exe' : 'sh';
-        shellArgs = isWin ? ['/c', 'agy update'] : ['-c', 'agy update'];
-      } else if (isWin) {
-        shellCmd = powershellCmd;
-        shellArgs = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', tool.installScript.win];
-      } else {
-        shellCmd = 'sh';
-        shellArgs = ['-c', tool.installScript.unix];
+        const shellCmd = isWin ? 'cmd.exe' : 'sh';
+        const shellArgs = isWin ? ['/c', 'agy update'] : ['-c', 'agy update'];
+        return runStreamingCommand(tool, shellCmd, shellArgs, { ...process.env }, {
+          action: '更新', successMsg: `${tool.name} 操作完成`
+        });
       }
-    } else if (isWin) {
-      shellCmd = powershellCmd;
-      shellArgs = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', tool.installScript.win];
-    } else {
-      shellCmd = 'sh';
-      shellArgs = ['-c', tool.installScript.unix];
     }
+
+    // AtomCode 安装前先结束占用中的二进制，避免 Windows 无法替换文件。
+    if (tool.id === 'atomcode' && isWin) {
+      await execCommand('taskkill', ['/f', '/im', 'atomcode.exe'], { ignoreError: true, timeout: 5000 }).catch(() => {});
+      await new Promise(resolve => setTimeout(resolve, 800));
+    }
+
+    const url = tool.installScript[isWin ? 'winUrl' : 'unixUrl'];
+    if (!url) {
+      const message = `${tool.name} 未提供当前平台的 HTTPS 安装脚本`;
+      sendLog('error', tool.id, message);
+      return { success: false, message };
+    }
+    return runDownloadedScript(tool, url, {
+      action: '安装', successMsg: `${tool.name} 操作完成`
+    });
+  }
+
+  // ===== npm 安装类工具：先查询当前 registry 的版本，再安装不可变的精确版本 =====
+  const versionInfo = await fetchLatestFromRegistry(tool.pkg);
+  const exactVersion = versionInfo.latest && parseSemver(versionInfo.latest)
+    ? String(versionInfo.latest).trim().replace(/^v/i, '')
+    : null;
+  if (!exactVersion) {
+    const message = `无法从 HTTPS registry 获取有效版本，未执行安装：${versionInfo.error || '版本格式无效'}`;
+    sendLog('error', tool.id, message);
+    return { success: false, message };
+  }
+  const installCmd = `npm install -g ${tool.pkg}@${exactVersion} --registry=${currentRegistry}`;
+  if (isWin) {
+    shellCmd = 'cmd.exe';
+    shellArgs = ['/c', installCmd];
   } else {
-    // ===== npm 安装类工具 =====
-    if (isWin) {
-      shellCmd = 'cmd.exe';
-      shellArgs = ['/c', tool.updateCmd];
-    } else {
-      shellCmd = 'sh';
-      shellArgs = ['-c', tool.updateCmd];
-    }
+    shellCmd = 'sh';
+    shellArgs = ['-c', installCmd];
   }
 
   const childEnv = { ...process.env, NPM_CONFIG_REGISTRY: currentRegistry };
@@ -1354,6 +1466,103 @@ async function doInstallOrUpdate(toolId) {
     action: '安装',
     successMsg: `${tool.name} 操作完成`
   });
+}
+
+// 厂商安装脚本只允许 HTTPS；完整下载后再执行，避免 HTTP 错误/截断响应直接进入 shell 管道。
+const MAX_VENDOR_SCRIPT_BYTES = 4 * 1024 * 1024;
+async function downloadVendorScript(url) {
+  const source = new URL(url);
+  if (source.protocol !== 'https:' || source.username || source.password) {
+    throw new Error('厂商安装脚本 URL 必须为无凭据的 HTTPS 地址');
+  }
+  const response = await fetchWithTimeout(source.href, {}, 30000);
+  const finalUrl = new URL(response.url || source.href);
+  if (!response.ok) throw new Error(`脚本下载失败（HTTP ${response.status}）`);
+  if (finalUrl.protocol !== 'https:' || finalUrl.username || finalUrl.password) {
+    throw new Error('厂商脚本重定向必须保持无凭据的 HTTPS 地址');
+  }
+  const announcedSize = Number(response.headers.get('content-length'));
+  if (Number.isFinite(announcedSize) && announcedSize > MAX_VENDOR_SCRIPT_BYTES) {
+    throw new Error('厂商脚本超过 4 MiB 安全上限');
+  }
+  const reader = response.body && response.body.getReader ? response.body.getReader() : null;
+  if (!reader) throw new Error('当前运行时不支持安全读取脚本响应');
+  const chunks = [];
+  let total = 0;
+  let bodyTimer;
+  try {
+    const bodyRead = (async () => {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > MAX_VENDOR_SCRIPT_BYTES) throw new Error('厂商脚本超过 4 MiB 安全上限');
+        chunks.push(Buffer.from(value));
+      }
+    })();
+    await Promise.race([bodyRead, new Promise((_, reject) => {
+      bodyTimer = setTimeout(() => reject(new Error('厂商脚本响应体读取超时')), 30000);
+    })]);
+  } catch (err) {
+    await reader.cancel().catch(() => {});
+    throw err;
+  } finally {
+    clearTimeout(bodyTimer);
+  }
+  if (total === 0) throw new Error('厂商脚本响应为空');
+  return Buffer.concat(chunks, total);
+}
+
+function getWindowsPowerShellPath() {
+  const root = process.env.WINDIR || 'C:\\Windows';
+  const candidates = [
+    path.join(root, 'sysnative', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+    path.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  ];
+  return candidates.find(fs.existsSync) || 'powershell.exe';
+}
+
+async function runDownloadedScript(tool, url, { action, successMsg, args = [] }) {
+  let directory;
+  try {
+    const script = await downloadVendorScript(url);
+    directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-tool-updater-'));
+    const isWin = os.platform() === 'win32';
+    const scriptPath = path.join(directory, isWin ? 'vendor-script.ps1' : 'vendor-script.sh');
+    fs.writeFileSync(scriptPath, script, { mode: 0o600 });
+    const unixShell = tool.installScript && tool.installScript.unixShell;
+    const command = isWin ? getWindowsPowerShellPath() : (unixShell === 'bash' ? 'bash' : 'sh');
+    const commandArgs = isWin
+      ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath, ...args]
+      : [scriptPath, ...args];
+    const env = { ...process.env };
+    if (isWin) {
+      const systemRoot = env.SystemRoot || 'C:\\Windows';
+      const modulePaths = [
+        path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'Modules'),
+        path.join(systemRoot, 'SysWOW64', 'WindowsPowerShell', 'v1.0', 'Modules')
+      ];
+      env.PSModulePath = [...(env.PSModulePath || '').split(';').filter(Boolean), ...modulePaths]
+        .filter((value, index, all) => all.findIndex(item => item.toLowerCase() === value.toLowerCase()) === index)
+        .join(';');
+    }
+    const result = await runStreamingCommand(tool, command, commandArgs, env, { action, successMsg });
+    // 超时后进程组会被终止；延迟清理避免解释器尚未完全退出时文件被锁定。
+    const cleanup = setTimeout(() => {
+      try { fs.rmSync(directory, { recursive: true, force: true }); } catch { /* 下次系统清理临时目录 */ }
+    }, 60000);
+    if (cleanup.unref) cleanup.unref();
+    directory = null;
+    return result;
+  } catch (err) {
+    const message = `${action}脚本下载或准备失败：${err.message}`;
+    sendLog('error', tool.id, message);
+    return { success: false, message };
+  } finally {
+    if (directory) {
+      try { fs.rmSync(directory, { recursive: true, force: true }); } catch { /* 忽略临时文件清理错误 */ }
+    }
+  }
 }
 
 // 安装/卸载子进程超时（5 分钟），防止子进程挂起导致 UI 锁死
@@ -1381,7 +1590,7 @@ function runStreamingCommand(tool, shellCmd, shellArgs, env, { action, successMs
     let child;
     try {
       // windowsHide 隐藏控制台窗口；不 detached，避免某些安全软件拦截新进程组
-      child = spawn(shellCmd, shellArgs, { env, windowsHide: true, detached: false });
+      child = spawn(shellCmd, shellArgs, { env, windowsHide: true, detached: !isWin });
     } catch (spawnErr) {
       // spawn 同步抛出的错误（如 EPERM）
       const isPermError = spawnErr.code === 'EPERM' || spawnErr.code === 'EACCES';
@@ -1509,25 +1718,16 @@ async function doUninstall(toolId) {
       return { success: false, message: leftMsg, docsUrl: SCRIPT_INSTALLED_TOOLS[tool.id].docsUrl, manualUninstall: true };
     }
 
-    // 兜底走官方卸载脚本。必须显式传 --keep-data / -KeepData：
-    // 无 flag 时脚本在非 TTY 下直接拒绝执行（自动兜底必失败），TTY 下交互默认又会删 ~/.atomcode 的本地状态，
-    // 与「保留用户数据」的承诺不符。命令只维护这一份，自动执行与失败提示共用，避免漂移
-    sendLog('info', tool.id, 'atomcode uninstall 不可用，改用官方卸载脚本 ...');
-    // PS 5.1 下 `irm ... | iex` 不能直接接参数，需用脚本块包一层才能传 -Yes / -KeepData；
-    // sh 用 `sh -s --` 把参数透传给脚本。
-    // Windows 分支补两处 PS 5.1 兼容处理（官方 install.ps1 里也有同样写法）：
-    // 显式启用 TLS 1.2（PS 5.1 默认协议集可能不含它），并给 irm 加 -UseBasicParsing
-    // （否则会走 IE 解析引擎，在 IE 未完成初始化的机器上会失败）
-    const scriptCmd = isWin
-      ? '[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; & ([scriptblock]::Create((Invoke-RestMethod -Uri https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/uninstall.ps1 -UseBasicParsing))) -Yes -KeepData'
-      : 'curl -fsSL https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/uninstall.sh | sh -s -- --yes --keep-data';
-    const shellCmd = isWin ? 'powershell.exe' : 'sh';
-    const shellArgs = isWin
-      ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', scriptCmd]
-      : ['-c', scriptCmd];
-    const scriptResult = await runStreamingCommand(tool, shellCmd, shellArgs, { ...process.env }, {
+    // 兜底脚本先通过 HTTPS 下载到临时文件，再执行；保留用户数据参数与原行为一致。
+    sendLog('info', tool.id, 'atomcode uninstall 不可用，改用已下载的官方卸载脚本 ...');
+    const scriptUrl = isWin
+      ? 'https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/uninstall.ps1'
+      : 'https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/uninstall.sh';
+    const scriptArgs = isWin ? ['-Yes', '-KeepData'] : ['--yes', '--keep-data'];
+    const scriptResult = await runDownloadedScript(tool, scriptUrl, {
       action: '卸载',
-      successMsg: `${tool.name} 已卸载（保留 ~/.atomcode 用户数据）`
+      successMsg: `${tool.name} 已卸载（保留 ~/.atomcode 用户数据）`,
+      args: scriptArgs
     });
     if (scriptResult.success) {
       // 官方脚本找不到二进制时依然打印 "uninstall complete." 并以 0 退出，
@@ -1540,11 +1740,9 @@ async function doUninstall(toolId) {
       return { success: false, message: leftMsg, docsUrl: SCRIPT_INSTALLED_TOOLS[tool.id].docsUrl, manualUninstall: true };
     }
 
-    // 失败提示里给的就是刚才实际跑过的那条官方卸载脚本命令（含 --keep-data），语义与自动卸载一致
+    // 告知用户官方脚本位置，避免在错误提示里再生成可直接复制执行的管道命令。
     const docsUrl = SCRIPT_INSTALLED_TOOLS[tool.id].docsUrl;
-    const msg = `${tool.name} 自动卸载失败（${scriptResult.message}）。可手动执行官方卸载脚本：`
-      + (isWin ? 'PowerShell 运行 ' : '终端运行 ')
-      + `\`${scriptCmd}\``;
+    const msg = `${tool.name} 自动卸载失败（${scriptResult.message}）。官方脚本地址：${scriptUrl}`;
     sendLog('error', tool.id, msg);
     return { success: false, message: msg, docsUrl, manualUninstall: true };
   }
@@ -1575,42 +1773,74 @@ async function doUninstall(toolId) {
   });
 }
 
+// 所有 renderer IPC 都必须来自当前窗口加载的本地 index.html 主 frame。
+function isTrustedIpcEvent(event) {
+  if (!mainWindow || mainWindow.isDestroyed()) return false;
+  const contents = mainWindow.webContents;
+  const frame = event && event.senderFrame;
+  if (!event || event.sender !== contents || !frame || frame !== contents.mainFrame) return false;
+  try {
+    return frame.url === pathToFileURL(path.join(__dirname, 'index.html')).href;
+  } catch {
+    return false;
+  }
+}
+
+function registerTrustedIpcHandler(channel, handler) {
+  ipcMain.handle(channel, (event, ...args) => {
+    if (!isTrustedIpcEvent(event)) {
+      throw new Error(`拒绝来自非受信任页面的 IPC 调用：${channel}`);
+    }
+    return handler(event, ...args);
+  });
+}
+
 // ===== IPC 处理程序（主进程 ↔ 渲染进程通信） =====
 
-// 获取工具配置（内置 + 自定义，带当前镜像源生成的 updateCmd）
-ipcMain.handle('get-tools', () => getAllTools());
+// 获取工具配置（内置 + 白名单投影的自定义工具）
+registerTrustedIpcHandler('get-tools', () => getAllTools());
 
 // 批量检测所有工具版本（并行执行，流式推送）
 // 每检测完一个工具立即通过 'tool-checked' 事件推送到渲染进程，
 // 实现卡片逐张亮起的流式效果，而非全部完成后一次性刷新
-ipcMain.handle('check-versions', async () => {
+registerTrustedIpcHandler('check-versions', async () => {
+  const now = Date.now();
+  if (now - lastCheckBatchAt < CHECK_BATCH_MIN_INTERVAL_MS) {
+    throw new Error('版本检测请求过于频繁，请稍后再试');
+  }
+  lastCheckBatchAt = now;
+  const runId = beginCheckRun();
   // 检测前刷新 PATH（命中 TTL 缓存时不会拉起子进程）
   await refreshProcessPath();
   const tools = getAllTools();
-  const results = await Promise.all(
-    tools.map(async (t) => {
-      const result = await checkTool(t);
-      // 每完成一个立即推送（流式）
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('tool-checked', result);
-      }
-      return result;
-    })
-  );
-  return results;
+  const results = await Promise.all(tools.map(async (tool) => {
+    if (!isCurrentCheckRun(runId, activeCheckRunId)) return null;
+    const result = await runLimitedCheck(() => isCurrentCheckRun(runId, activeCheckRunId)
+      ? checkToolSafely(tool)
+      : null);
+    if (!result) return null;
+    // 无论单项检测是否异常都返回结果；只允许最新轮次推送流式状态。
+    if (isCurrentCheckRun(runId, activeCheckRunId) && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('tool-checked', { runId, result });
+    }
+    return result;
+  }));
+  return { runId, results: results.filter(Boolean) };
 });
 
-// 检测单个工具版本
-ipcMain.handle('check-version', async (event, toolId) => {
+// 检测单个工具版本；新请求会使未完成的旧批次失效。
+registerTrustedIpcHandler('check-version', async (event, toolId) => {
+  const runId = beginCheckRun();
   await refreshProcessPath();
   const tools = getAllTools();
   const tool = tools.find(t => t.id === toolId);
   if (!tool) throw new Error('未知工具');
-  return checkTool(tool);
+  const result = await runLimitedCheck(() => checkToolSafely(tool));
+  return { ...result, runId };
 });
 
 // 更新单个工具
-ipcMain.handle('update-tool', async (event, toolId) => {
+registerTrustedIpcHandler('update-tool', async (event, toolId) => {
   const result = await doInstallOrUpdate(toolId);
   // 安装/更新可能写入了新的 PATH 条目，强制刷新（绕过 TTL 缓存）
   await refreshProcessPath({ force: true });
@@ -1618,7 +1848,7 @@ ipcMain.handle('update-tool', async (event, toolId) => {
 });
 
 // 安装单个工具（逻辑与更新相同，npm install -g 同时适用于首次安装和升级）
-ipcMain.handle('install-tool', async (event, toolId) => {
+registerTrustedIpcHandler('install-tool', async (event, toolId) => {
   const result = await doInstallOrUpdate(toolId);
   // 安装/更新可能写入了新的 PATH 条目，强制刷新（绕过 TTL 缓存）
   await refreshProcessPath({ force: true });
@@ -1626,7 +1856,7 @@ ipcMain.handle('install-tool', async (event, toolId) => {
 });
 
 // 卸载单个工具
-ipcMain.handle('uninstall-tool', async (event, toolId) => {
+registerTrustedIpcHandler('uninstall-tool', async (event, toolId) => {
   const result = await doUninstall(toolId);
   await refreshProcessPath({ force: true });
   return result;
@@ -1635,15 +1865,15 @@ ipcMain.handle('uninstall-tool', async (event, toolId) => {
 // ===== 镜像源相关 IPC =====
 
 // 获取可用镜像源列表
-ipcMain.handle('get-registries', () => REGISTRIES);
+registerTrustedIpcHandler('get-registries', () => REGISTRIES);
 
 // 获取当前使用的镜像源 URL
-ipcMain.handle('get-current-registry', () => currentRegistry);
+registerTrustedIpcHandler('get-current-registry', () => currentRegistry);
 
 // 切换镜像源并持久化保存
-ipcMain.handle('set-registry', (event, url) => {
+registerTrustedIpcHandler('set-registry', (event, url) => {
   if (!isValidRegistryUrl(url)) {
-    const message = '无效的镜像源 URL，请使用 http:// 或 https:// 开头的地址';
+    const message = '无效的镜像源 URL，请使用 HTTPS 地址';
     sendLog('error', 'system', message);
     return { success: false, message };
   }
@@ -1660,11 +1890,19 @@ ipcMain.handle('set-registry', (event, url) => {
  * 添加自定义工具并分配唯一 ID（custom_ + 时间戳）
  * @param {object} toolConfig - { name, cmd, pkg, versionArg? }
  */
-ipcMain.handle('add-custom-tool', (event, toolConfig) => {
-  toolConfig = toolConfig || {};
-  const name = (toolConfig.name || '').trim();
-  const cmd = (toolConfig.cmd || '').trim();
-  const pkg = (toolConfig.pkg || '').trim();
+registerTrustedIpcHandler('add-custom-tool', (event, toolConfig) => {
+  if (!hasOnlyFields(toolConfig, ['name', 'cmd', 'pkg', 'versionArg'])) {
+    return { success: false, message: '自定义工具配置包含不支持的字段' };
+  }
+  if (!isValidToolName(toolConfig.name) || typeof toolConfig.cmd !== 'string' || typeof toolConfig.pkg !== 'string') {
+    return { success: false, message: '工具名称、命令名和包名必须是有效文本' };
+  }
+  if (toolConfig.versionArg !== undefined && typeof toolConfig.versionArg !== 'string') {
+    return { success: false, message: '版本参数必须是文本' };
+  }
+  const name = toolConfig.name.trim();
+  const cmd = toolConfig.cmd.trim();
+  const pkg = toolConfig.pkg.trim();
   const versionArg = (toolConfig.versionArg || '--version').trim() || '--version';
 
   if (!name) {
@@ -1694,7 +1932,7 @@ ipcMain.handle('add-custom-tool', (event, toolConfig) => {
 });
 
 // 移除指定 ID 的自定义工具
-ipcMain.handle('remove-custom-tool', (event, toolId) => {
+registerTrustedIpcHandler('remove-custom-tool', (event, toolId) => {
   let custom = loadCustomTools();
   const removed = custom.find(t => t.id === toolId);
   custom = custom.filter(t => t.id !== toolId);
@@ -1713,7 +1951,7 @@ ipcMain.handle('remove-custom-tool', (event, toolId) => {
  * - 检查 npm 是否可用
  * - 返回操作系统版本信息
  */
-ipcMain.handle('check-environment', async () => {
+registerTrustedIpcHandler('check-environment', async () => {
   const result = { node: null, npm: null, os: null, errors: [] };
 
   // GUI 启动时继承的 PATH 可能不含 Homebrew/nvm（macOS）或注册表最新 PATH（Windows），
@@ -1769,7 +2007,7 @@ ipcMain.handle('check-environment', async () => {
 // ===== 日志导出 IPC =====
 
 // 弹出保存对话框，将日志文本写入用户选择的文件
-ipcMain.handle('export-log', async (event, logText) => {
+registerTrustedIpcHandler('export-log', async (event, logText) => {
   const { filePath } = await dialog.showSaveDialog(mainWindow, {
     title: '导出日志',
     defaultPath: `ai-tool-updater-log-${new Date().toISOString().slice(0, 10)}.txt`,
@@ -1784,13 +2022,13 @@ ipcMain.handle('export-log', async (event, logText) => {
 });
 
 // 复制文本到剪贴板
-ipcMain.handle('copy-to-clipboard', (event, text) => {
+registerTrustedIpcHandler('copy-to-clipboard', (event, text) => {
   clipboard.writeText(text);
   return { success: true };
 });
 
 // 弹出保存对话框，将版本报告文本写入用户选择的文件
-ipcMain.handle('export-report', async (event, { text, defaultName } = {}) => {
+registerTrustedIpcHandler('export-report', async (event, { text, defaultName } = {}) => {
   const { filePath } = await dialog.showSaveDialog(mainWindow, {
     title: '导出版本报告',
     defaultPath: defaultName || `ai-tools-version-report-${new Date().toISOString().slice(0, 10)}.md`,
@@ -1807,7 +2045,7 @@ ipcMain.handle('export-report', async (event, { text, defaultName } = {}) => {
 // ===== 管理员权限提示 IPC =====
 
 // 弹出对话框提示用户需要管理员权限（Windows 全局安装 npm 包时可能需要）
-ipcMain.handle('show-admin-tip', async () => {
+registerTrustedIpcHandler('show-admin-tip', async () => {
   const isWin = os.platform() === 'win32';
   const message = isWin
     ? '在 Windows 上全局安装 npm 包可能需要管理员权限。\n\n如果安装/更新失败，请右键点击「AI Code Tool Updater.exe」选择「以管理员身份运行」，或将 npm 全局目录配置到用户目录后重试。'
@@ -1826,7 +2064,7 @@ ipcMain.handle('show-admin-tip', async () => {
  * 使用系统默认浏览器打开外部链接
  * - 仅允许 http/https 协议，防止恶意 URI 注入
  */
-ipcMain.handle('open-external', async (event, url) => {
+registerTrustedIpcHandler('open-external', async (event, url) => {
   try {
     const parsed = new URL(url);
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
@@ -1843,7 +2081,7 @@ ipcMain.handle('open-external', async (event, url) => {
 // ===== 设置 IPC =====
 
 // 获取当前所有设置
-ipcMain.handle('get-settings', () => {
+registerTrustedIpcHandler('get-settings', () => {
   return loadSettings();
 });
 
@@ -1856,7 +2094,7 @@ const SETTINGS_SCHEMA = {
 };
 
 // 保存设置，如果后台检测间隔有变化则重启定时器，开机自启变化则应用登录项
-ipcMain.handle('save-settings', (event, input) => {
+registerTrustedIpcHandler('save-settings', (event, input) => {
   // 只接受白名单内且类型合法的字段：例如 backgroundCheckHours 为 NaN 会让 setInterval 近乎无间隔地狂跑
   const newSettings = {};
   for (const [key, isValid] of Object.entries(SETTINGS_SCHEMA)) {
@@ -1875,8 +2113,12 @@ ipcMain.handle('save-settings', (event, input) => {
 // ===== 一键配置 agyyolo 到 PowerShell Profile =====
 // agyyolo 是一个 PowerShell 函数，调用 agy --dangerously-skip-permissions
 
-// 要写入 PowerShell Profile 的函数体
-const AGYYOLO_FUNCTION_BODY = `function agyyolo {\n    agy --dangerously-skip-permissions\n}\n`;
+// 通过成对标记精确识别可撤销内容；旧版写入内容仅在完全匹配时迁移/移除。
+const AGYYOLO_BEGIN_MARKER = '# >>> AI Code Tool Updater: agyyolo >>>';
+const AGYYOLO_END_MARKER = '# <<< AI Code Tool Updater: agyyolo <<<';
+const AGYYOLO_FUNCTION_BODY = `${AGYYOLO_BEGIN_MARKER}\nfunction agyyolo {\n    agy --dangerously-skip-permissions\n}\n${AGYYOLO_END_MARKER}\n`;
+const AGYYOLO_LEGACY_PATTERN = /^function agyyolo[ \t]*\{\r?\n[ \t]+agy --dangerously-skip-permissions\r?\n[ \t]*\}\r?\n?/gm;
+const AGYYOLO_MANAGED_PATTERN = /^# >>> AI Code Tool Updater: agyyolo >>>\r?\nfunction agyyolo \{\r?\n    agy --dangerously-skip-permissions\r?\n\}\r?\n# <<< AI Code Tool Updater: agyyolo <<<(?:\r?\n|$)/m;
 
 /**
  * PowerShell 查询脚本：输出 $PROFILE 与「文档」已知文件夹下的 Profile 路径
@@ -1886,7 +2128,7 @@ const PROFILE_QUERY_PS = `
 $ErrorActionPreference='SilentlyContinue'
 $paths = New-Object System.Collections.Generic.List[string]
 if ($PROFILE) { $paths.Add([string]$PROFILE) }
-if ($PROFILE.CurrentUserCurrentHost) { $paths.Add($PROFILE.CurrentUserCurrentHost) }
+if ($PROFILE.CurrentUserCurrentHost) { $paths.Add([string]$PROFILE.CurrentUserCurrentHost) }
 $docs = [Environment]::GetFolderPath('MyDocuments')
 if ($docs) {
   $paths.Add([IO.Path]::Combine($docs,'WindowsPowerShell','Microsoft.PowerShell_profile.ps1'))
@@ -1897,10 +2139,8 @@ if ($docs) {
 
 /**
  * 获取所有可能的 PowerShell Profile 路径
- * - 通过 powershell.exe 读取 $PROFILE 和「文档」已知文件夹，
- *   兼容 OneDrive 重定向（此时 %USERPROFILE%\Documents 不是真实文档目录）
+ * - 通过 powershell.exe 读取 $PROFILE 和「文档」已知文件夹，兼容 OneDrive 重定向
  * - 同时覆盖 Windows PowerShell 5.1 与 PowerShell 7+
- * @returns {Promise<string[]>} Profile 文件路径数组
  */
 async function getPowerShellProfiles() {
   const home = os.homedir();
@@ -1909,8 +2149,6 @@ async function getPowerShellProfiles() {
     path.join(home, 'Documents', 'PowerShell', 'Microsoft.PowerShell_profile.ps1')
   ];
   if (os.platform() !== 'win32') return fallback;
-
-  let discovered = [];
   try {
     const output = await execCommand(
       'powershell.exe',
@@ -1918,93 +2156,162 @@ async function getPowerShellProfiles() {
       { shell: false, timeout: 8000 }
     );
     const parsed = JSON.parse(output.trim());
-    if (parsed && Array.isArray(parsed.paths)) discovered = parsed.paths;
+    if (parsed && Array.isArray(parsed.paths)) {
+      const discovered = parsed.paths.filter(p => typeof p === 'string' && p.trim()).map(p => p.trim());
+      if (discovered.length) return [...new Set(discovered)];
+    }
   } catch { /* 查询失败时退回默认路径 */ }
-
-  return [...new Set([...(discovered.length ? discovered : fallback)]
-    .filter(p => typeof p === 'string' && p.trim())
-    .map(p => p.trim()))];
+  return fallback;
 }
 
-/**
- * 确保 Profile 文件所在的目录和文件本身存在，不存在则创建
- * @param {string} profilePath - Profile 文件路径
- * @returns {string} 原样返回 profilePath（方便链式调用）
- */
 function ensureProfile(profilePath) {
   const dir = path.dirname(profilePath);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
+  fs.mkdirSync(dir, { recursive: true });
   if (!fs.existsSync(profilePath)) {
-    fs.writeFileSync(profilePath, '', 'utf-8');
+    try { fs.writeFileSync(profilePath, '', { encoding: 'utf-8', flag: 'wx' }); }
+    catch (err) { if (err.code !== 'EEXIST') throw err; }
   }
   return profilePath;
 }
 
-/**
- * 将 agyyolo 函数写入指定的 PowerShell Profile（幂等，已存在则跳过）
- * @param {string} profilePath - Profile 文件路径
- * @returns {object} { ok: boolean, reason: string }
- */
-function installAgyyoloToProfile(profilePath) {
-  if (!profilePath) {
-    return { ok: false, reason: 'Profile 路径为空' };
+function readProfileContent(profilePath) {
+  const bytes = fs.readFileSync(profilePath);
+  try {
+    // fatal 解码避免把 UTF-16/本地代码页内容替换成乱码后覆盖原文件；默认移除 UTF-8 BOM。
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error('Profile 不是有效 UTF-8 编码，原文件未修改；请先备份并转换编码。');
   }
-
-  ensureProfile(profilePath);
-
-  const content = fs.readFileSync(profilePath, 'utf-8');
-  if (/function\s+agyyolo\b/.test(content)) {
-    return { ok: true, reason: '已存在，跳过' };
-  }
-
-  // 如果文件末尾没有换行，先补两个换行再追加函数
-  const ending = content && !content.endsWith('\n') ? '\n\n' : '';
-  fs.writeFileSync(profilePath, content + ending + AGYYOLO_FUNCTION_BODY, 'utf-8');
-  return { ok: true, reason: '已写入' };
 }
 
-/**
- * IPC：一键将 agyyolo 配置到所有 PowerShell Profile
- * - 先检测 agy 命令是否可用
- * - 遍历所有 Profile 路径，逐个写入
- * - 返回每个 Profile 的处理结果
- */
-ipcMain.handle('install-agyyolo', async () => {
-  // 该功能只写入 PowerShell Profile，仅 Windows 可用
+function writeProfileAtomically(profilePath, content) {
+  const mode = fs.existsSync(profilePath) ? fs.statSync(profilePath).mode : 0o600;
+  const original = fs.existsSync(profilePath) ? fs.readFileSync(profilePath) : Buffer.alloc(0);
+  const hasBom = original.length >= 3 && original[0] === 0xef && original[1] === 0xbb && original[2] === 0xbf;
+  if (hasBom && !content.startsWith('\uFEFF')) content = '\uFEFF' + content;
+  const tempDirectory = fs.mkdtempSync(path.join(path.dirname(profilePath), '.agyyolo-'));
+  const tempPath = path.join(tempDirectory, 'profile.ps1');
+  try {
+    fs.writeFileSync(tempPath, content, { encoding: 'utf-8', mode, flag: 'wx' });
+    fs.renameSync(tempPath, profilePath);
+  } finally {
+    try { fs.rmSync(tempDirectory, { recursive: true, force: true }); } catch { /* 忽略临时文件清理错误 */ }
+  }
+}
+
+function getAgyyoloManagedState(content) {
+  const beginCount = content.split(AGYYOLO_BEGIN_MARKER).length - 1;
+  const endCount = content.split(AGYYOLO_END_MARKER).length - 1;
+  if (!beginCount && !endCount) return 'none';
+  return beginCount === 1 && endCount === 1 && AGYYOLO_MANAGED_PATTERN.test(content)
+    ? 'valid' : 'conflict';
+}
+
+function installAgyyoloToProfile(profilePath) {
+  if (!profilePath) return { ok: false, reason: 'Profile 路径为空' };
+  ensureProfile(profilePath);
+  let content = readProfileContent(profilePath);
+  const managedState = getAgyyoloManagedState(content);
+  if (managedState === 'valid') return { ok: true, reason: '已由本工具配置' };
+  if (managedState === 'conflict') {
+    return { ok: false, reason: '配置标记重复、损坏或内容已修改，未覆盖' };
+  }
+
+  // 只迁移完全匹配的旧版定义；多个旧定义合并为一个管理块。
+  AGYYOLO_LEGACY_PATTERN.lastIndex = 0;
+  const withoutLegacy = content.replace(AGYYOLO_LEGACY_PATTERN, '');
+  AGYYOLO_LEGACY_PATTERN.lastIndex = 0;
+  if (/function\s+agyyolo\b/i.test(withoutLegacy)) {
+    return { ok: false, reason: '检测到同名自定义函数，未覆盖' };
+  }
+  const migrated = withoutLegacy !== content;
+  content = withoutLegacy;
+  const ending = content && !content.endsWith('\n') ? '\n\n' : '';
+  writeProfileAtomically(profilePath, content + ending + AGYYOLO_FUNCTION_BODY);
+  return { ok: true, reason: migrated ? '已将旧配置升级为可撤销标记' : '已写入' };
+}
+
+function removeAgyyoloFromProfile(profilePath) {
+  if (!profilePath || !fs.existsSync(profilePath)) return { ok: true, reason: '配置文件不存在' };
+  let content = readProfileContent(profilePath);
+  const before = content;
+  const managedState = getAgyyoloManagedState(content);
+  if (managedState === 'conflict') {
+    return { ok: false, reason: '配置标记重复、损坏或内容已修改，未删除' };
+  }
+  if (managedState === 'valid') content = content.replace(AGYYOLO_MANAGED_PATTERN, '');
+  AGYYOLO_LEGACY_PATTERN.lastIndex = 0;
+  content = content.replace(AGYYOLO_LEGACY_PATTERN, '');
+  AGYYOLO_LEGACY_PATTERN.lastIndex = 0;
+  if (content === before) {
+    if (/function\s+agyyolo\b/i.test(content)) {
+      return { ok: false, reason: '存在未由本工具管理的同名函数，未删除' };
+    }
+    return { ok: true, reason: '没有需要撤销的配置' };
+  }
+  writeProfileAtomically(profilePath, content);
+  return { ok: true, reason: '已撤销本工具管理的配置' };
+}
+
+function profileResultsSucceeded(results) {
+  return results.length > 0 && results.every(item => item.ok);
+}
+
+function uniqueProfilePaths(profiles) {
+  const seen = new Set();
+  return profiles.filter(profilePath => {
+    const key = String(profilePath).toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+async function confirmAgyyoloProfileChange({ remove, profiles }) {
+  const operation = remove ? '撤销' : '写入';
+  const fileList = profiles.length ? profiles.map(p => `• ${p}`).join('\n') : '（未能发现 Profile 路径）';
+  const message = remove
+    ? '将从以下 PowerShell Profile 中移除本工具管理的 agyyolo 函数；其它内容不会改动。'
+    : '这会持久写入一个 agyyolo 函数，执行 agy --dangerously-skip-permissions。该命令会跳过 agy 的逐项权限确认，可能允许它直接修改文件或运行命令。';
+  const detail = `${operation}目标：\n${fileList}\n\n可以随时使用“撤销 agyyolo”移除本工具管理的配置。`;
+  const { response } = await dialog.showMessageBox(mainWindow, {
+    type: 'warning',
+    title: remove ? '确认撤销 agyyolo 配置' : '确认写入跳过权限确认的命令',
+    message,
+    detail,
+    buttons: ['取消', remove ? '确认撤销' : '我了解风险，继续'],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true
+  });
+  return response === 1;
+}
+
+registerTrustedIpcHandler('install-agyyolo', async () => {
   if (os.platform() !== 'win32') {
     const message = 'agyyolo 仅支持 Windows PowerShell，当前系统无需配置。';
     sendLog('error', 'system', message);
     return { success: false, agyFound: false, results: [], message };
   }
 
-  // 先检测 agy 是否安装
   let agyFound = false;
   try {
     await execCommand('agy', ['--version'], { shell: true, timeout: 10000 });
     agyFound = true;
-  } catch {
-    agyFound = false;
-  }
-
+  } catch { agyFound = false; }
   if (!agyFound) {
     const message = '未检测到 agy 命令，请先安装 agy 并将其所在目录加入系统 PATH，再执行配置。';
     sendLog('error', 'system', message);
     return { success: false, agyFound: false, results: [], message };
   }
 
-  sendLog('info', 'system', 'agy 命令已找到，开始将 agyyolo 配置到 PowerShell Profile ...');
+  const profiles = uniqueProfilePaths(await getPowerShellProfiles());
+  if (!(await confirmAgyyoloProfileChange({ remove: false, profiles }))) {
+    return { success: false, cancelled: true, agyFound: true, results: [], message: '已取消，未修改任何 Profile。' };
+  }
 
   const results = [];
-  const seen = new Set(); // 去重（不同路径可能指向同一文件）
-  const profiles = await getPowerShellProfiles();
-
   for (const profilePath of profiles) {
-    const key = profilePath.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-
     try {
       const result = installAgyyoloToProfile(profilePath);
       results.push({ profile: profilePath, ...result });
@@ -2014,10 +2321,39 @@ ipcMain.handle('install-agyyolo', async () => {
       sendLog('error', 'system', `[FAIL] ${profilePath} - ${err.message}`);
     }
   }
+  const success = profileResultsSucceeded(results);
+  const message = success
+    ? 'agyyolo 配置完成。请重新打开 PowerShell 窗口使用。'
+    : `配置未能全部完成：成功 ${results.filter(r => r.ok).length} 个，失败 ${results.filter(r => !r.ok).length} 个。`;
+  sendLog(success ? 'success' : 'error', 'system', message);
+  return { success, results, agyFound: true, message };
+});
 
-  sendLog('success', 'system', 'agyyolo 配置完成。请重新打开 PowerShell 窗口使用 agyyolo。');
-
-  return { success: true, results, agyFound: true };
+registerTrustedIpcHandler('remove-agyyolo', async () => {
+  if (os.platform() !== 'win32') {
+    return { success: false, results: [], message: 'agyyolo 仅支持 Windows PowerShell。' };
+  }
+  const profiles = uniqueProfilePaths(await getPowerShellProfiles());
+  if (!(await confirmAgyyoloProfileChange({ remove: true, profiles }))) {
+    return { success: false, cancelled: true, results: [], message: '已取消，未修改任何 Profile。' };
+  }
+  const results = [];
+  for (const profilePath of profiles) {
+    try {
+      const result = removeAgyyoloFromProfile(profilePath);
+      results.push({ profile: profilePath, ...result });
+      sendLog(result.ok ? 'success' : 'error', 'system', `[${result.ok ? 'OK' : 'FAIL'}] ${profilePath} - ${result.reason}`);
+    } catch (err) {
+      results.push({ profile: profilePath, ok: false, reason: err.message });
+      sendLog('error', 'system', `[FAIL] ${profilePath} - ${err.message}`);
+    }
+  }
+  const success = profileResultsSucceeded(results);
+  const message = success
+    ? 'agyyolo 配置已撤销。'
+    : `撤销未能全部完成：成功 ${results.filter(r => r.ok).length} 个，失败 ${results.filter(r => !r.ok).length} 个。`;
+  sendLog(success ? 'success' : 'error', 'system', message);
+  return { success, results, message };
 });
 
 // ===== 一键打开 PowerShell IPC =====
@@ -2028,7 +2364,7 @@ ipcMain.handle('install-agyyolo', async () => {
  * - macOS：打开 Terminal（通过 osascript）
  * - Linux：打开 x-terminal-emulator
  */
-ipcMain.handle('open-powershell', async () => {
+registerTrustedIpcHandler('open-powershell', async () => {
   const isWin = os.platform() === 'win32';
 
   if (isWin) {
@@ -2073,7 +2409,7 @@ ipcMain.handle('open-powershell', async () => {
 
 // ===== 镜像源测速 IPC =====
 // 向指定镜像源发送 HTTP HEAD 请求并测量响应时间（毫秒）
-ipcMain.handle('ping-registry', async (event, url) => {
+registerTrustedIpcHandler('ping-registry', async (event, url) => {
   if (!isValidRegistryUrl(url)) {
     return { success: false, message: '无效的镜像源 URL' };
   }

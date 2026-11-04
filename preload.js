@@ -74,6 +74,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // 一键配置 agyyolo 到 PowerShell Profile
   installAgyyolo: () => ipcRenderer.invoke('install-agyyolo'),
+  removeAgyyolo: () => ipcRenderer.invoke('remove-agyyolo'),
 
   // 一键打开 PowerShell
   openPowerShell: () => ipcRenderer.invoke('open-powershell'),
@@ -95,6 +96,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const wrapped = () => callback();
     ipcRenderer.on('trigger-check', wrapped);
     return () => ipcRenderer.removeListener('trigger-check', wrapped);
+  },
+
+  // 监听检测轮次开始；渲染层据此忽略任何较旧批次的迟到结果。
+  onCheckRunStarted: (callback) => {
+    const wrapped = (event, runId) => callback(runId);
+    ipcRenderer.on('check-run-started', wrapped);
+    return () => ipcRenderer.removeListener('check-run-started', wrapped);
   },
 
   // 监听单个工具检测完成（流式推送，每检测完一个工具推送一次）
@@ -119,6 +127,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.removeAllListeners('update-log');
     ipcRenderer.removeAllListeners('trigger-check');
     ipcRenderer.removeAllListeners('tool-checked');
+    ipcRenderer.removeAllListeners('check-run-started');
     ipcRenderer.removeAllListeners('highlight-tool');
   }
 });
