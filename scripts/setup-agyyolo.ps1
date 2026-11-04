@@ -1,107 +1,186 @@
 ﻿#requires -Version 5.1
+param(
+    [switch]$Remove
+)
+
 <#
 .SYNOPSIS
-    一键永久配置 agyyolo 函数到 PowerShell Profile。
+    配置或撤销 agyyolo PowerShell Profile 函数。
 .DESCRIPTION
-    将 function agyyolo { agy --dangerously-skip-permissions } 写入当前用户的
-    PowerShell 5.1 与 PowerShell 7+ 的配置文件，使其在新窗口中永久可用。
-    如果函数已存在，则跳过写入，避免重复。
+    安装会将 agy --dangerously-skip-permissions 写入当前用户的 PowerShell Profile，
+    每次安装都要求输入 YES 明确确认；撤销使用 -Remove，并要求输入 REMOVE。
+    只移除本工具标记的代码块或完全匹配的旧版函数定义。
 #>
 
 $ErrorActionPreference = 'Stop'
-
-# 确保中文提示在 Windows 控制台正确显示
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-$functionName = 'agyyolo'
-$functionBody = @'
+$beginMarker = '# >>> AI Code Tool Updater: agyyolo >>>'
+$endMarker = '# <<< AI Code Tool Updater: agyyolo <<<'
+$managedBlock = @"
+$beginMarker
 function agyyolo {
     agy --dangerously-skip-permissions
 }
-'@
+$endMarker
+"@
+$legacyPattern = '(?m)^function agyyolo[ \t]*\{\r?\n[ \t]+agy --dangerously-skip-permissions\r?\n[ \t]*\}\r?\n?'
+$managedPattern = '(?m)^# >>> AI Code Tool Updater: agyyolo >>>\r?\nfunction agyyolo \{\r?\n    agy --dangerously-skip-permissions\r?\n\}\r?\n# <<< AI Code Tool Updater: agyyolo <<<(?:\r?\n|$)'
 
-function EnsureProfile($profilePath) {
-    if ([string]::IsNullOrWhiteSpace($profilePath)) {
-        return $null
-    }
+function Get-ProfilePaths {
+    $paths = @()
+    if ($PROFILE) { $paths += [string]$PROFILE }
+    if ($PROFILE.CurrentUserCurrentHost) { $paths += [string]$PROFILE.CurrentUserCurrentHost }
 
-    $dir = Split-Path -Parent $profilePath
-    if (!(Test-Path $dir)) {
-        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    $documents = [Environment]::GetFolderPath('MyDocuments')
+    if ([string]::IsNullOrWhiteSpace($documents)) {
+        $documents = Join-Path $env:USERPROFILE 'Documents'
     }
-    if (!(Test-Path $profilePath)) {
-        New-Item -ItemType File -Path $profilePath -Force | Out-Null
-    }
-    return $profilePath
+    $paths += Join-Path $documents 'WindowsPowerShell\Microsoft.PowerShell_profile.ps1'
+    $paths += Join-Path $documents 'PowerShell\Microsoft.PowerShell_profile.ps1'
+
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    return @($paths | Where-Object { ![string]::IsNullOrWhiteSpace($_) -and $seen.Add($_) })
 }
 
-function InstallFunctionToProfile($profilePath) {
-    if ([string]::IsNullOrWhiteSpace($profilePath)) {
-        return @{ ok = $false; reason = 'Profile 路径为空' }
+function Ensure-Profile([string]$profilePath) {
+    $directory = Split-Path -Parent $profilePath
+    if (!(Test-Path -LiteralPath $directory)) {
+        [IO.Directory]::CreateDirectory($directory) | Out-Null
     }
-
-    $content = Get-Content -Path $profilePath -Raw -ErrorAction SilentlyContinue
-    if ($content -and $content -match "function\s+$functionName\b") {
-        return @{ ok = $true; reason = '已存在，跳过' }
-    }
-
-    # 确保文件末尾有换行，再追加函数
-    $ending = if ($content -and !$content.EndsWith("`n")) { "`n`n" } else { "" }
-    "$ending$functionBody" | Out-File -FilePath $profilePath -Append -Encoding utf8 -NoNewline
-
-    return @{ ok = $true; reason = '已写入' }
-}
-
-# 同时处理 PowerShell 5.1 与 PowerShell 7+ 的 CurrentUserCurrentHost Profile
-$profiles = @()
-
-# 当前正在运行的 PowerShell 的 $PROFILE（由 PowerShell 自己解析，最准确）
-$profiles += EnsureProfile $PROFILE
-
-# 「文档」已知文件夹可能被 OneDrive 重定向，不能直接用 %USERPROFILE%\Documents
-$documents = [Environment]::GetFolderPath('MyDocuments')
-if ([string]::IsNullOrWhiteSpace($documents)) {
-    $documents = Join-Path $env:USERPROFILE 'Documents'
-}
-$profiles += EnsureProfile (Join-Path $documents 'WindowsPowerShell\Microsoft.PowerShell_profile.ps1')
-$profiles += EnsureProfile (Join-Path $documents 'PowerShell\Microsoft.PowerShell_profile.ps1')
-
-# 去重后逐个安装
-$results = @()
-$seen = @{}
-foreach ($p in $profiles) {
-    if ([string]::IsNullOrWhiteSpace($p)) { continue }
-    $key = $p.ToLowerInvariant()
-    if ($seen.ContainsKey($key)) { continue }
-    $seen[$key] = $true
-
-    $result = InstallFunctionToProfile $p
-    $results += [PSCustomObject]@{
-        Profile = $p
-        Status  = if ($result.ok) { 'OK' } else { 'FAIL' }
-        Reason  = $result.reason
+    if (!(Test-Path -LiteralPath $profilePath)) {
+        [IO.File]::WriteAllText($profilePath, '', [Text.UTF8Encoding]::new($false))
     }
 }
 
-# 输出结果
-Write-Host ""
-Write-Host "agyyolo 配置结果：" -ForegroundColor Cyan
-foreach ($r in $results) {
-    $color = if ($r.Status -eq 'OK') { 'Green' } else { 'Red' }
-    Write-Host "  [$($r.Status)] $($r.Profile) - $($r.Reason)" -ForegroundColor $color
+function Read-ProfileContent([string]$profilePath) {
+    $bytes = [IO.File]::ReadAllBytes($profilePath)
+    try {
+        $decoder = [Text.UTF8Encoding]::new($false, $true)
+        return $decoder.GetString($bytes).TrimStart([char]0xFEFF)
+    } catch {
+        throw 'Profile 不是有效 UTF-8 编码，原文件未修改；请先备份并转换编码。'
+    }
 }
 
-# 检查 agy 命令是否可用
-$agyFound = $null -ne (Get-Command agy -ErrorAction SilentlyContinue)
-Write-Host ""
-if ($agyFound) {
-    Write-Host "agy 命令已找到，配置完成。请重新打开 PowerShell 窗口使用 agyyolo。" -ForegroundColor Green
+function Write-ProfileAtomically([string]$profilePath, [string]$content) {
+    $temporaryPath = "$profilePath.$([Guid]::NewGuid().ToString('N')).tmp"
+    $bytes = [IO.File]::ReadAllBytes($profilePath)
+    $hasBom = $bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
+    try {
+        [IO.File]::WriteAllText($temporaryPath, $content, [Text.UTF8Encoding]::new($hasBom, $true))
+        if (Test-Path -LiteralPath $profilePath) {
+            [IO.File]::Replace($temporaryPath, $profilePath, $null)
+        } else {
+            [IO.File]::Move($temporaryPath, $profilePath)
+        }
+    } finally {
+        if (Test-Path -LiteralPath $temporaryPath) {
+            Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Get-ManagedState([string]$content) {
+    $beginCount = [regex]::Matches($content, [regex]::Escape($beginMarker)).Count
+    $endCount = [regex]::Matches($content, [regex]::Escape($endMarker)).Count
+    if ($beginCount -eq 0 -and $endCount -eq 0) { return 'none' }
+    if ($beginCount -eq 1 -and $endCount -eq 1 -and [regex]::IsMatch($content, $managedPattern)) { return 'valid' }
+    return 'conflict'
+}
+
+function Install-FunctionToProfile([string]$profilePath) {
+    Ensure-Profile $profilePath
+    $content = Read-ProfileContent $profilePath
+    $managedState = Get-ManagedState $content
+    if ($managedState -eq 'valid') { return @{ ok = $true; reason = '已由本工具配置' } }
+    if ($managedState -eq 'conflict') {
+        return @{ ok = $false; reason = '配置标记重复、损坏或内容已修改，未覆盖' }
+    }
+
+    $withoutLegacy = [regex]::Replace($content, $legacyPattern, '')
+    if ([regex]::IsMatch($withoutLegacy, 'function\s+agyyolo\b', 'IgnoreCase')) {
+        return @{ ok = $false; reason = '检测到同名自定义函数，未覆盖' }
+    }
+    $migrated = $withoutLegacy -cne $content
+    $ending = if ($withoutLegacy.Length -gt 0 -and !$withoutLegacy.EndsWith("`n")) { "`r`n`r`n" } else { '' }
+    Write-ProfileAtomically $profilePath ($withoutLegacy + $ending + $managedBlock + "`r`n")
+    $reason = if ($migrated) { '已将旧配置升级为可撤销标记' } else { '已写入' }
+    return @{ ok = $true; reason = $reason }
+}
+
+function Remove-FunctionFromProfile([string]$profilePath) {
+    if (!(Test-Path -LiteralPath $profilePath)) {
+        return @{ ok = $true; reason = '配置文件不存在' }
+    }
+    $content = Read-ProfileContent $profilePath
+    $managedState = Get-ManagedState $content
+    if ($managedState -eq 'conflict') {
+        return @{ ok = $false; reason = '配置标记重复、损坏或内容已修改，未删除' }
+    }
+    $updated = [regex]::Replace($content, $managedPattern, '')
+    $updated = [regex]::Replace($updated, $legacyPattern, '')
+    if ($updated -ceq $content) {
+        if ([regex]::IsMatch($content, 'function\s+agyyolo\b', 'IgnoreCase')) {
+            return @{ ok = $false; reason = '存在未由本工具管理的同名函数，未删除' }
+        }
+        return @{ ok = $true; reason = '没有需要撤销的配置' }
+    }
+    Write-ProfileAtomically $profilePath $updated
+    return @{ ok = $true; reason = '已撤销本工具管理的配置' }
+}
+
+if (!$Remove) {
+    Write-Host '警告：agyyolo 会执行 agy --dangerously-skip-permissions，跳过逐项权限确认。' -ForegroundColor Yellow
+    Write-Host '该命令可能允许 agy 直接修改文件或运行命令；此配置会持久写入 PowerShell Profile。' -ForegroundColor Yellow
+    $answer = Read-Host '确认写入请输入 YES（默认取消）'
+    if ($answer -cne 'YES') {
+        Write-Host '已取消，未修改任何 Profile。' -ForegroundColor Cyan
+        exit 0
+    }
+    if ($null -eq (Get-Command agy -ErrorAction SilentlyContinue)) {
+        Write-Error '未检测到 agy 命令；请先安装 agy 并配置 PATH。未修改任何 Profile。'
+        exit 1
+    }
 } else {
-    Write-Host "警告：未找到 agy 命令。请确保 agy 所在目录已加入系统 PATH，" -ForegroundColor Yellow
-    Write-Host "       否则 agyyolo 函数仍会报错。" -ForegroundColor Yellow
+    Write-Host '将只撤销本工具标记的 agyyolo 配置；其它 Profile 内容不会删除。' -ForegroundColor Yellow
+    $answer = Read-Host '确认撤销请输入 REMOVE（默认取消）'
+    if ($answer -cne 'REMOVE') {
+        Write-Host '已取消，未修改任何 Profile。' -ForegroundColor Cyan
+        exit 0
+    }
 }
 
-Write-Host ""
-Write-Host "按任意键退出..." -NoNewLine
-$null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
-Write-Host ""
+$operation = if ($Remove) { '撤销' } else { '配置' }
+$profiles = Get-ProfilePaths
+$results = @()
+foreach ($profile in $profiles) {
+    try {
+        $result = if ($Remove) { Remove-FunctionFromProfile $profile } else { Install-FunctionToProfile $profile }
+        $results += [PSCustomObject]@{ Profile = $profile; Ok = $result.ok; Reason = $result.reason }
+    } catch {
+        $results += [PSCustomObject]@{ Profile = $profile; Ok = $false; Reason = $_.Exception.Message }
+    }
+}
+
+Write-Host "`n$operation agyyolo 配置结果：" -ForegroundColor Cyan
+foreach ($result in $results) {
+    $status = if ($result.Ok) { 'OK' } else { 'FAIL' }
+    $color = if ($result.Ok) { 'Green' } else { 'Red' }
+    Write-Host "  [$status] $($result.Profile) - $($result.Reason)" -ForegroundColor $color
+}
+$success = $results.Count -gt 0 -and @($results | Where-Object { !$_.Ok }).Count -eq 0
+if (!$success) {
+    Write-Host "部分或全部 Profile $operation失败；请检查上方失败路径。" -ForegroundColor Red
+    $exitCode = 1
+} else {
+    Write-Host "agyyolo $operation完成。" -ForegroundColor Green
+    $exitCode = 0
+}
+
+try {
+    Write-Host "`n按任意键退出..." -NoNewLine
+    $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+    Write-Host ''
+} catch { }
+exit $exitCode

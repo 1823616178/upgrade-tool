@@ -10,7 +10,7 @@
     "sign:win": "powershell -ExecutionPolicy Bypass -File scripts/sign-and-build.ps1",
     "build:mac": "electron-builder --mac",
     "icons": "node scripts/generate-icons.js",
-    "test": "node scripts/verify-semver.js",
+    "test": "node scripts/verify-semver.js && node scripts/verify-safety.js",
     "postinstall": "electron-builder install-app-deps"
   },
   "keywords": [

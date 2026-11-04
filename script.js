@@ -1,6 +1,7 @@
 // ===== 状态变量 =====
 let toolsData = [];
 let isChecking = false;
+let latestCheckRunId = 0;
 /**
  * 工具级操作锁（替代全局 isUpdating 布尔）
  * 使用 Set 维护“正在操作”的工具 ID，支持同时操作多个工具
@@ -45,6 +46,7 @@ const btnExportLog = document.getElementById('btn-export-log');
 const btnAddTool = document.getElementById('btn-add-tool');
 const btnSettings = document.getElementById('btn-settings');
 const btnInstallAgyyolo = document.getElementById('btn-install-agyyolo');
+const btnRemoveAgyyolo = document.getElementById('btn-remove-agyyolo');
 const btnOpenPowerShell = document.getElementById('btn-open-powershell');
 const btnExportReport = document.getElementById('btn-export-report');
 const selectRegistry = document.getElementById('select-registry');
@@ -111,6 +113,7 @@ function applyPlatformUI() {
   if (platform === 'win32') return;
 
   if (btnInstallAgyyolo) btnInstallAgyyolo.style.display = 'none';
+  if (btnRemoveAgyyolo) btnRemoveAgyyolo.style.display = 'none';
   if (btnOpenPowerShell) {
     btnOpenPowerShell.innerHTML = '<span class="icon">💻</span> 终端';
     btnOpenPowerShell.title = platform === 'darwin' ? '打开 Terminal' : '打开终端';
@@ -237,6 +240,7 @@ function bindEvents() {
   btnInstallAll.addEventListener('click', installAll);
   btnAdmin.addEventListener('click', () => window.electronAPI.showAdminTip());
   btnInstallAgyyolo.addEventListener('click', installAgyyolo);
+  if (btnRemoveAgyyolo) btnRemoveAgyyolo.addEventListener('click', removeAgyyolo);
   btnOpenPowerShell.addEventListener('click', openPowerShell);
   btnExportReport.addEventListener('click', exportVersionReport);
   btnClearLog.addEventListener('click', clearLog);
@@ -322,9 +326,13 @@ function bindLogListener() {
   window.electronAPI.onTriggerCheck(() => {
     checkVersions();
   });
+  // 监听检测轮次开始；任何旧轮次的迟到结果都不得覆盖新状态。
+  window.electronAPI.onCheckRunStarted((runId) => {
+    if (Number.isSafeInteger(runId)) latestCheckRunId = Math.max(latestCheckRunId, runId);
+  });
   // 监听流式检测结果（每检测完一个工具就更新对应卡片）
-  window.electronAPI.onToolChecked((result) => {
-    onSingleToolChecked(result);
+  window.electronAPI.onToolChecked((payload) => {
+    if (payload && payload.runId === latestCheckRunId) onSingleToolChecked(payload.result);
   });
   // 监听高亮指定工具（来自系统通知点击）
   window.electronAPI.onHighlightTool((toolId) => {
@@ -452,8 +460,8 @@ async function saveCustomRegistry() {
     appendLog('error', 'system', '请输入镜像源 URL');
     return;
   }
-  if (!/^https?:\/\//i.test(url)) {
-    appendLog('error', 'system', '镜像源 URL 必须以 http:// 或 https:// 开头');
+  if (!/^https:\/\//i.test(url)) {
+    appendLog('error', 'system', '镜像源 URL 必须以 https:// 开头');
     return;
   }
   try {
@@ -772,7 +780,9 @@ async function checkVersions() {
   // 流式检测：初始化工具数据（骨架屏状态）后，每检测完一个通过 onToolChecked 即时刷新对应卡片
   // 最终 checkVersions 返回全部结果（用于应急投票原则等）
   try {
-    toolsData = await window.electronAPI.checkVersions();
+    const response = await window.electronAPI.checkVersions();
+    if (!response || response.runId !== latestCheckRunId) return;
+    toolsData = response.results;
     // 先解除检测状态再渲染，确保批量按钮按最终结果正确启用
     isChecking = false;
     renderTools();
@@ -850,24 +860,39 @@ async function installAgyyolo() {
   try {
     btnInstallAgyyolo.disabled = true;
     appendLog('start', 'system', '正在检测 agy 是否安装 ...');
-
     const result = await window.electronAPI.installAgyyolo();
-    if (!result.success) {
-      appendLog('error', 'system', result.message || 'agyyolo 配置失败');
+    if (result.cancelled) {
+      appendLog('info', 'system', result.message || '已取消，未修改 Profile。');
       return;
     }
-
-    for (const item of result.results) {
+    for (const item of result.results || []) {
       const status = item.ok ? 'OK' : 'FAIL';
-      const type = item.ok ? 'success' : 'error';
-      appendLog(type, 'system', `[${status}] ${item.profile} - ${item.reason}`);
+      appendLog(item.ok ? 'success' : 'error', 'system', `[${status}] ${item.profile} - ${item.reason}`);
     }
-
-    appendLog('success', 'system', 'agyyolo 配置完成。请重新打开 PowerShell 窗口使用 agyyolo。');
+    appendLog(result.success ? 'success' : 'error', 'system', result.message || 'agyyolo 配置未能全部完成');
   } catch (err) {
     appendLog('error', 'system', `配置 agyyolo 异常: ${err.message}`);
   } finally {
     btnInstallAgyyolo.disabled = false;
+  }
+}
+
+async function removeAgyyolo() {
+  try {
+    btnRemoveAgyyolo.disabled = true;
+    const result = await window.electronAPI.removeAgyyolo();
+    if (result.cancelled) {
+      appendLog('info', 'system', result.message || '已取消，未修改 Profile。');
+      return;
+    }
+    for (const item of result.results || []) {
+      appendLog(item.ok ? 'success' : 'error', 'system', `[${item.ok ? 'OK' : 'FAIL'}] ${item.profile} - ${item.reason}`);
+    }
+    appendLog(result.success ? 'success' : 'error', 'system', result.message || 'agyyolo 配置未能全部撤销');
+  } catch (err) {
+    appendLog('error', 'system', `撤销 agyyolo 配置异常: ${err.message}`);
+  } finally {
+    btnRemoveAgyyolo.disabled = false;
   }
 }
 
@@ -1034,7 +1059,9 @@ async function runBatch(ids, button, action, { verb, idleHtml }) {
  */
 async function refreshSingleTool(toolId, { rerender = true } = {}) {
   try {
-    const updated = await window.electronAPI.checkVersion(toolId);
+    const response = await window.electronAPI.checkVersion(toolId);
+    if (!response || response.runId !== latestCheckRunId) return;
+    const { runId, ...updated } = response;
     const idx = toolsData.findIndex(t => t.id === toolId);
     if (idx !== -1) {
       toolsData[idx] = updated;
