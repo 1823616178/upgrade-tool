@@ -2,6 +2,11 @@
 
 一款基于 Electron 的 AI 编程助手工具更新器，检测最新版本并支持一键更新。
 
+## 仓库地址
+
+- Git 仓库：<https://cnb.cool/kakusun/upload-tool-client.git>
+- 项目主页：<https://cnb.cool/kakusun/upload-tool-client>
+
 ## 功能特性
 
 - 自动检测 AI 编程工具本地/远端版本（semver 比较含预发布规则，仅提示真正有更新的工具）
