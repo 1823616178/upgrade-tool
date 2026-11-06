@@ -88,6 +88,16 @@ const BUILTIN_TOOLS = [
   { id: 'kimi',       name: 'Kimi Code',              cmd: 'kimi',       pkg: '@moonshot-ai/kimi-code',        versionArg: '--version', icon: '🌙' },
   { id: 'claude',     name: 'Claude Code',             cmd: 'claude',     pkg: '@anthropic-ai/claude-code',     versionArg: '--version', icon: '✳️' },
   { id: 'cline',      name: 'Cline',                   cmd: 'cline',      pkg: 'cline',                        versionArg: '--version', icon: '🧩' },
+  {
+    // 官方保留 cursor-agent 别名；不用通用的 agent，避免与 Grok 等工具的同名命令冲突
+    id: 'cursor', name: 'Cursor CLI', cmd: 'cursor-agent', versionArg: '--version', icon: '🔹',
+    installScript: {
+      winUrl: 'https://cursor.com/install?win32=true',
+      unixUrl: 'https://cursor.com/install',
+      unixShell: 'bash'
+    },
+    docsUrl: 'https://cursor.com/docs/cli'
+  },
   { id: 'codex',      name: 'OpenAI Codex',            cmd: 'codex',      pkg: '@openai/codex',                 versionArg: '--version', icon: '🔷' },
   { id: 'opencode',   name: 'OpenCode',                cmd: 'opencode',   pkg: 'opencode-ai',                   versionArg: '--version', icon: '🖥️' },
   { id: 'codebuddy',  name: 'CodeBuddy',               cmd: 'codebuddy',  pkg: '@tencent-ai/codebuddy-code',    versionArg: '--version', icon: '🤖' },
@@ -162,7 +172,7 @@ const BUILTIN_TOOLS = [
   },
 ];
 
-// 通过官方安装脚本安装的工具（antigravity/qoder/qoder_cn/grok 无统一卸载命令；atomcode 由 doUninstall 特判自动卸载）
+// 通过官方安装脚本安装的工具（antigravity/cursor/qoder/qoder_cn/grok/muse 无统一卸载命令；atomcode 由 doUninstall 特判自动卸载）
 // 直接从 BUILTIN_TOOLS 中提取有 installScript 的工具 ID
 const SCRIPT_INSTALLED_TOOLS = Object.fromEntries(
   BUILTIN_TOOLS
@@ -1084,6 +1094,7 @@ function getAntigravityPlatform() {
 /**
  * 检测单个工具的最新可用版本
  * - antigravity：从官方 API 获取平台对应的 manifest
+ * - cursor：从官方安装脚本中提取当前发布版本
  * - 其他工具：通过 npm view 查询 registry 中的最新版本
  * @param {object} tool - 工具配置对象
  * @returns {Promise<object>} { latest, error? }
@@ -1100,6 +1111,21 @@ async function checkLatestVersion(tool) {
       return { latest: manifest.version };
     } catch (err) {
       // 不再回退到 windows_amd64：其它平台会拿到错误版本号
+      return { latest: null, error: err.message };
+    }
+  }
+
+  // Cursor 没有独立的 npm 版本线；官方安装脚本中的下载 URL 固定了当前发布版本。
+  if (tool.id === 'cursor') {
+    try {
+      const url = os.platform() === 'win32' ? tool.installScript.winUrl : tool.installScript.unixUrl;
+      const res = await fetchWithTimeout(url);
+      if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+      const script = await res.text();
+      const match = script.match(/https:\/\/downloads\.cursor\.com\/lab\/([^/'"\s]+)\//);
+      if (!match || !parseSemver(match[1])) throw new Error('官方安装脚本中无有效版本号');
+      return { latest: match[1] };
+    } catch (err) {
       return { latest: null, error: err.message };
     }
   }
@@ -1679,7 +1705,7 @@ async function findAtomcodeBinary(knownPaths = []) {
  * 执行单个工具的卸载
  * - npm 安装的工具：npm uninstall -g <pkg>
  * - AtomCode：先跑内置 `atomcode uninstall`，失败回退官方卸载脚本，再失败才给手动指引
- * - 其他通过官方脚本安装的工具（antigravity/qoder/qoder_cn/grok）：没有统一卸载命令，提示手动卸载
+ * - 其他通过官方脚本安装的工具（antigravity/cursor/qoder/qoder_cn/grok/muse）：没有统一卸载命令，提示手动卸载
  * @param {string} toolId - 工具 ID
  * @returns {Promise<object>} { success, code?, message?, docsUrl? }
  */
