@@ -85,6 +85,37 @@ check('check generation accepts only the current run', () => {
   assert.strictEqual(helpers.isCurrentCheckRun(11, 12), false);
 });
 
+checkAsync('Cursor uses official install sources and parses the published version', async () => {
+  const match = mainSource.match(/const BUILTIN_TOOLS = (\[[\s\S]*?\n\]);/);
+  assert(match, 'missing built-in tool list');
+  const tools = new Function(`return ${match[1]};`)();
+  const cursor = tools.find(tool => tool.id === 'cursor');
+  assert(cursor, 'missing Cursor CLI');
+  assert.strictEqual(cursor.cmd, 'cursor-agent');
+  assert.strictEqual(cursor.altCmds, undefined);
+  assert.strictEqual(cursor.installScript.winUrl, 'https://cursor.com/install?win32=true');
+  assert.strictEqual(cursor.installScript.unixUrl, 'https://cursor.com/install');
+
+  let script = "$downloadUrl = 'https://downloads.cursor.com/lab/2026.11.05-86047df/'";
+  const checkLatestVersion = new Function(
+    'os', 'fetchWithTimeout', 'parseSemver',
+    `${extractFunction('checkLatestVersion')}\nreturn checkLatestVersion;`
+  )(
+    { platform: () => 'win32' },
+    async url => {
+      assert.strictEqual(url, cursor.installScript.winUrl);
+      return { ok: true, text: async () => script };
+    },
+    helpers.parseSemver
+  );
+  assert.deepStrictEqual(await checkLatestVersion(cursor), { latest: '2026.11.05-86047df' });
+
+  script = 'installer response without a version';
+  const invalid = await checkLatestVersion(cursor);
+  assert.strictEqual(invalid.latest, null);
+  assert.match(invalid.error, /无有效版本号/);
+});
+
 check('per-profile result aggregation rejects empty and partial success', () => {
   assert.strictEqual(helpers.profileResultsSucceeded([]), false);
   assert.strictEqual(helpers.profileResultsSucceeded([{ ok: true }, { ok: false }]), false);
