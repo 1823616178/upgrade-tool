@@ -924,6 +924,17 @@ body.is-resizing-log * { cursor: row-resize !important; }
   line-height: 1.4;
 }
 
+.form-error {
+  margin: 0;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  color: #fca5a5;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .form-row {
   margin-top: 4px;
 }
@@ -998,8 +1009,15 @@ body.is-resizing-log * { cursor: row-resize !important; }
   border-radius: 999px;
   font-size: 12px;
   font-weight: 600;
+  font-family: inherit;
+  appearance: none;
   border: 1px solid var(--border);
   background: var(--surface-card);
+  outline: none;
+}
+
+.stat-chip:focus-visible {
+  box-shadow: 0 0 0 2px var(--primary-light);
 }
 
 .stat-chip b {

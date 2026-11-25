@@ -3,10 +3,10 @@ let toolsData = [];
 let isChecking = false;
 let latestCheckRunId = 0;
 /**
- * 工具级操作锁（替代全局 isUpdating 布尔）
- * 使用 Set 维护“正在操作”的工具 ID，支持同时操作多个工具
+ * 工具级操作锁：维护“正在操作”的工具 ID -> 操作类型（'update' | 'install' | 'uninstall'）
+ * 单个工具执行期间仅锁定自身卡片，其它工具仍可独立操作；直到新版本回查完成后才解锁
  */
-const updatingTools = new Set();
+const updatingTools = new Map();
 /** 批量更新/安装是否正在执行（防止局部刷新时误把批量按钮重新启用） */
 let isBatchRunning = false;
 /** 切换到「自定义源」前，记住当前选中的镜像源，取消时可恢复 */
@@ -15,19 +15,16 @@ let previousRegistryUrl = '';
 let statsFilter = null;
 
 // ===== 日志数据（过滤视图的数据源；复制/导出始终作用于全部条目） =====
-const MAX_LOG_ENTRIES = 2000; // 上限，防止长时间运行内存无限增长
+const MAX_LOG_ENTRIES = 2000;
 const logEntries = [];
 const logFilters = { level: '', tool: '', keyword: '' };
-/** 当前实际渲染到 DOM 的日志条数（增量渲染需要它来维护空状态与截断） */
 let visibleLogCount = 0;
-/** 日志搜索防抖定时器（避免每次按键都重建最多 2000 行 DOM） */
 let logSearchTimer = null;
 
 // ===== 日志面板高度 =====
 const LOG_HEIGHT_STORAGE_KEY = 'ai-tool-updater:log-panel-height';
 const MIN_LOG_HEIGHT = 150;
 const MIN_GRID_HEIGHT = 160;
-/** 当前日志面板高度（px）；null 表示尚未初始化 */
 let logPanelHeight = null;
 
 // ===== DOM 元素 =====
@@ -69,6 +66,7 @@ const inputToolName = document.getElementById('input-tool-name');
 const inputToolPkg = document.getElementById('input-tool-pkg');
 const inputToolCmd = document.getElementById('input-tool-cmd');
 const inputToolVersionArg = document.getElementById('input-tool-version-arg');
+const modalFormError = document.getElementById('modal-form-error');
 
 // 设置模态框
 const settingsOverlay = document.getElementById('settings-overlay');
@@ -86,6 +84,7 @@ const btnRegistryClose = document.getElementById('btn-registry-close');
 const btnRegistryCancel = document.getElementById('btn-registry-cancel');
 const btnRegistrySave = document.getElementById('btn-registry-save');
 const inputRegistryUrl = document.getElementById('input-registry-url');
+const registryFormError = document.getElementById('registry-form-error');
 
 // ===== 初始化 =====
 async function init() {
@@ -94,7 +93,7 @@ async function init() {
   applyPlatformUI();
   initLogResizer();
 
-  // 环境检测独立执行，不阻塞首屏和版本检测（Windows 上 npm -v 冷启动可能较慢）
+  // 环境检测独立执行，不阻塞首屏和版本检测
   checkEnvironment();
 
   // 并行执行：镜像源加载、骨架屏渲染（基于真实工具列表，含自定义工具）
@@ -121,7 +120,6 @@ function applyPlatformUI() {
 }
 
 // ===== 日志面板高度拖拽 =====
-/** 日志面板可用的最大高度：保证工具网格至少保留 MIN_GRID_HEIGHT */
 function getMaxLogPanelHeight() {
   const style = getComputedStyle(mainEl);
   const paddingBottom = parseFloat(style.paddingBottom) || 0;
@@ -131,7 +129,6 @@ function getMaxLogPanelHeight() {
   return Math.max(MIN_LOG_HEIGHT, mainBottom - gridTop - MIN_GRID_HEIGHT - gap);
 }
 
-/** 设置日志面板高度（自动夹取到合法范围） */
 function setLogPanelHeight(height, { persist = false } = {}) {
   const desired = Number.isFinite(height) ? height : logSection.getBoundingClientRect().height;
   const clamped = Math.min(Math.max(Math.round(desired), MIN_LOG_HEIGHT), getMaxLogPanelHeight());
@@ -148,19 +145,16 @@ function setLogPanelHeight(height, { persist = false } = {}) {
   return clamped;
 }
 
-/** 默认高度：主内容区高度的 30%（窗口首次布局前用视口高度兜底） */
 function getDefaultLogPanelHeight() {
   const height = mainEl.getBoundingClientRect().height || window.innerHeight * 0.6;
   return Math.round(height * 0.3);
 }
 
-/** 窗口尺寸或统计条显隐变化后，重新夹取日志高度，避免溢出 */
 function clampLogPanelHeight() {
   if (logPanelHeight === null) return;
   setLogPanelHeight(logPanelHeight);
 }
 
-/** 绑定日志面板拖拽、双击复位和键盘调整 */
 function initLogResizer() {
   let saved = NaN;
   try {
@@ -182,7 +176,6 @@ function initLogResizer() {
     document.body.classList.add('is-resizing-log');
 
     const onMove = (ev) => {
-      // 向上拖动增加日志高度
       nextHeight = startHeight + (startY - ev.clientY);
       if (frame !== null) return;
       frame = requestAnimationFrame(() => {
@@ -206,12 +199,10 @@ function initLogResizer() {
     window.addEventListener('pointercancel', finish);
   });
 
-  // 双击恢复默认高度
   logResizer.addEventListener('dblclick', () => {
     setLogPanelHeight(getDefaultLogPanelHeight(), { persist: true });
   });
 
-  // 键盘调整：聚焦拖拽条后使用上下方向键
   logResizer.addEventListener('keydown', (event) => {
     if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
     event.preventDefault();
@@ -222,7 +213,6 @@ function initLogResizer() {
   window.addEventListener('resize', () => requestAnimationFrame(clampLogPanelHeight));
 }
 
-/** 从主进程获取真实工具列表并渲染骨架屏（内置 + 自定义，数量与名称始终同步） */
 async function renderSkeletonFromTools() {
   try {
     const tools = await window.electronAPI.getTools();
@@ -231,6 +221,17 @@ async function renderSkeletonFromTools() {
     appendLog('error', 'system', `加载工具列表失败: ${err.message}`);
     renderSkeleton([]);
   }
+}
+
+// ===== 模态框内联错误提示辅助 =====
+function showFormError(el, msg) {
+  if (!el) return;
+  el.textContent = msg;
+  el.style.display = msg ? 'block' : 'none';
+}
+
+function clearFormError(el) {
+  showFormError(el, '');
 }
 
 // ===== 事件绑定 =====
@@ -248,16 +249,13 @@ function bindEvents() {
   btnExportLog.addEventListener('click', exportLog);
   btnAddTool.addEventListener('click', openModal);
   btnSettings.addEventListener('click', openSettings);
-  // 镜像源测速：必须用 addEventListener 绑定，
-  // 页面 CSP 为 script-src 'self'（无 unsafe-inline），HTML 内联 onclick 会被直接拦截
+
   const btnPingRegistry = document.getElementById('btn-ping-registry');
   if (btnPingRegistry) btnPingRegistry.addEventListener('click', pingAllRegistries);
   const btnAutoRegistry = document.getElementById('btn-auto-registry');
   if (btnAutoRegistry) btnAutoRegistry.addEventListener('click', autoSelectFastestRegistry);
   btnDismissEnv.addEventListener('click', () => { envBanner.style.display = 'none'; });
 
-  // 工具卡片按钮：事件委托绑定一次，卡片重渲染/局部替换后都无需重新绑定
-  // （disabled 的按钮不会派发 click，操作锁仍然有效）
   toolsGrid.addEventListener('click', (e) => {
     const btn = e.target.closest('button');
     if (!btn) return;
@@ -270,15 +268,24 @@ function bindEvents() {
     }
   });
 
-  // 镜像源切换（含自定义源弹窗）
   selectRegistry.addEventListener('change', onRegistryChange);
 
-  // 自定义工具模态框
+  // 自定义工具模态框（支持输入时自动清错 + 回车提交）
   btnModalClose.addEventListener('click', closeModal);
   btnModalCancel.addEventListener('click', closeModal);
   btnModalSave.addEventListener('click', saveCustomTool);
   modalOverlay.addEventListener('click', (e) => {
     if (e.target === modalOverlay) closeModal();
+  });
+  [inputToolName, inputToolPkg, inputToolCmd, inputToolVersionArg].forEach((input) => {
+    if (!input) return;
+    input.addEventListener('input', () => clearFormError(modalFormError));
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        saveCustomTool();
+      }
+    });
   });
 
   // 设置模态框
@@ -289,13 +296,22 @@ function bindEvents() {
     if (e.target === settingsOverlay) closeSettings();
   });
 
-  // 自定义镜像源模态框
+  // 自定义镜像源模态框（支持输入时自动清错 + 回车提交）
   btnRegistryClose.addEventListener('click', cancelCustomRegistry);
   btnRegistryCancel.addEventListener('click', cancelCustomRegistry);
   btnRegistrySave.addEventListener('click', saveCustomRegistry);
   registryOverlay.addEventListener('click', (e) => {
     if (e.target === registryOverlay) cancelCustomRegistry();
   });
+  if (inputRegistryUrl) {
+    inputRegistryUrl.addEventListener('input', () => clearFormError(registryFormError));
+    inputRegistryUrl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        saveCustomRegistry();
+      }
+    });
+  }
 
   // 日志过滤
   logFilterLevel.addEventListener('change', () => { logFilters.level = logFilterLevel.value; renderLogs(); });
@@ -308,13 +324,35 @@ function bindEvents() {
     }, 150);
   });
 
-  // Esc 关闭任意打开的模态框
+  // Esc 关闭任意打开的模态框（确认弹框有独立键盘拦截，优先忽略）
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
+    const confirmOverlay = document.getElementById('confirm-overlay');
+    if (confirmOverlay && confirmOverlay.style.display === 'flex') return;
     if (modalOverlay.style.display === 'flex') closeModal();
     else if (settingsOverlay.style.display === 'flex') closeSettings();
     else if (registryOverlay.style.display === 'flex') cancelCustomRegistry();
   });
+}
+
+/**
+ * 合并单个工具检测结果到 toolsData
+ * 通过主进程单调递增的 seq 防止迟到的旧批次覆盖已由单工具刷新得到的更新状态
+ */
+function mergeToolResult(result) {
+  if (!result || !result.id) return false;
+  const idx = toolsData.findIndex(t => t.id === result.id);
+  if (idx !== -1) {
+    const existingSeq = Number(toolsData[idx].seq) || 0;
+    const incomingSeq = Number(result.seq) || 0;
+    if (incomingSeq > 0 && existingSeq > incomingSeq) {
+      return false;
+    }
+    toolsData[idx] = result;
+  } else {
+    toolsData.push(result);
+  }
+  return true;
 }
 
 function bindLogListener() {
@@ -322,19 +360,27 @@ function bindLogListener() {
   window.electronAPI.onUpdateLog((data) => {
     appendLog(data.type, data.toolId, data.message, data.time);
   });
-  // 监听托盘菜单发出的检测命令
   window.electronAPI.onTriggerCheck(() => {
     checkVersions();
   });
-  // 监听检测轮次开始；任何旧轮次的迟到结果都不得覆盖新状态。
   window.electronAPI.onCheckRunStarted((runId) => {
     if (Number.isSafeInteger(runId)) latestCheckRunId = Math.max(latestCheckRunId, runId);
   });
-  // 监听流式检测结果（每检测完一个工具就更新对应卡片）
   window.electronAPI.onToolChecked((payload) => {
     if (payload && payload.runId === latestCheckRunId) onSingleToolChecked(payload.result);
   });
-  // 监听高亮指定工具（来自系统通知点击）
+  if (window.electronAPI.onBackgroundResults) {
+    window.electronAPI.onBackgroundResults((payload) => {
+      if (!payload || !Array.isArray(payload.results) || isChecking) return;
+      if (Number.isSafeInteger(payload.runId)) {
+        latestCheckRunId = Math.max(latestCheckRunId, payload.runId);
+      }
+      for (const item of payload.results) {
+        mergeToolResult(item);
+      }
+      renderTools();
+    });
+  }
   window.electronAPI.onHighlightTool((toolId) => {
     highlightToolCard(toolId);
   });
@@ -345,17 +391,14 @@ async function checkEnvironment() {
   try {
     const env = await window.electronAPI.checkEnvironment();
 
-    // 展示环境信息到 footer
     if (envNode) envNode.textContent = `Node: ${env.node || '未安装'}`;
     if (envNpm) envNpm.textContent = `npm: ${env.npm || '未安装'}`;
     if (envOs) envOs.textContent = env.os || 'OS: 未知';
 
-    // 如果有错误，显示警告横幅 + Node 下载链接
     if (env.errors && env.errors.length > 0) {
       envBanner.style.display = 'flex';
       envBannerText.textContent = env.errors.join(' | ');
 
-      // 移除旧链接，避免重复添加
       const oldLink = envBanner.querySelector('.env-banner-link');
       if (oldLink) oldLink.remove();
 
@@ -393,13 +436,11 @@ async function loadRegistries() {
       selectRegistry.appendChild(option);
     }
 
-    // 添加「自定义源…」入口（始终 value 为 __custom__）
     const customEntry = document.createElement('option');
     customEntry.value = '__custom__';
     customEntry.textContent = '自定义源...';
     selectRegistry.appendChild(customEntry);
 
-    // 当前源不在预设中：额外展示一条当前自定义源
     const isPreset = registries.some(r => r.url === current);
     if (!isPreset && current) {
       const customActive = document.createElement('option');
@@ -436,6 +477,7 @@ async function onRegistryChange() {
 }
 
 function openCustomRegistryModal() {
+  clearFormError(registryFormError);
   inputRegistryUrl.value = previousRegistryUrl && !isPresetRegistry(previousRegistryUrl)
     ? previousRegistryUrl
     : '';
@@ -449,33 +491,34 @@ function isPresetRegistry(url) {
 }
 
 function cancelCustomRegistry() {
+  clearFormError(registryFormError);
   registryOverlay.style.display = 'none';
-  // 恢复到切换前的源
   loadRegistries();
 }
 
 async function saveCustomRegistry() {
   const url = inputRegistryUrl.value.trim();
   if (!url) {
-    appendLog('error', 'system', '请输入镜像源 URL');
+    showFormError(registryFormError, '请输入镜像源 URL');
     return;
   }
   if (!/^https:\/\//i.test(url)) {
-    appendLog('error', 'system', '镜像源 URL 必须以 https:// 开头');
+    showFormError(registryFormError, '镜像源 URL 必须以 https:// 开头');
     return;
   }
   try {
     const result = await window.electronAPI.setRegistry(url);
     if (!result.success) {
-      appendLog('error', 'system', result.message || '镜像源切换失败');
+      showFormError(registryFormError, result.message || '镜像源切换失败');
       return;
     }
+    clearFormError(registryFormError);
     registryOverlay.style.display = 'none';
     previousRegistryUrl = result.registry || url;
     await loadRegistries();
     appendLog('success', 'system', `已使用自定义镜像源: ${previousRegistryUrl}`);
   } catch (err) {
-    appendLog('error', 'system', `镜像源切换失败: ${err.message}`);
+    showFormError(registryFormError, `镜像源切换失败: ${err.message}`);
   }
 }
 
@@ -514,6 +557,7 @@ async function saveSettingsFromUI() {
 
 // ===== 自定义工具模态框 =====
 function openModal() {
+  clearFormError(modalFormError);
   inputToolName.value = '';
   inputToolPkg.value = '';
   inputToolCmd.value = '';
@@ -523,6 +567,7 @@ function openModal() {
 }
 
 function closeModal() {
+  clearFormError(modalFormError);
   modalOverlay.style.display = 'none';
 }
 
@@ -533,38 +578,43 @@ async function saveCustomTool() {
   const versionArg = inputToolVersionArg.value.trim() || '--version';
 
   if (!name || !pkg || !cmd) {
-    appendLog('error', 'system', '请填写完整的工具信息（名称、包名、命令名为必填）');
+    showFormError(modalFormError, '请填写完整的工具信息（名称、包名、命令名为必填）');
     return;
   }
 
   try {
     const result = await window.electronAPI.addCustomTool({ name, pkg, cmd, versionArg });
     if (!result || result.success === false) {
-      appendLog('error', 'system', (result && result.message) || '添加自定义工具失败');
+      showFormError(modalFormError, (result && result.message) || '添加自定义工具失败');
       return;
     }
     closeModal();
     appendLog('success', 'system', `自定义工具 "${name}" 已添加，正在刷新...`);
     await checkVersions();
   } catch (err) {
-    appendLog('error', 'system', `添加自定义工具失败: ${err.message}`);
+    showFormError(modalFormError, `添加自定义工具失败: ${err.message}`);
   }
 }
 
-// ===== 渲染骨架屏（按真实工具列表） =====
+// ===== 卡片标题与骨架屏模板 =====
+function buildToolTitleHtml(tool) {
+  const defaultIcon = tool.isCustom ? '🔧' : (tool.name ? tool.name.charAt(0).toUpperCase() : '•');
+  const icon = escapeHtml(tool.icon || defaultIcon);
+  const customBadge = tool.isCustom ? '<span class="custom-badge">自定义</span>' : '';
+  return `<span class="tool-icon" aria-hidden="true">${icon}</span>${escapeHtml(tool.name)} ${customBadge}`;
+}
+
 function renderSkeleton(tools) {
   toolsGrid.innerHTML = '';
   for (const tool of tools) {
     const card = document.createElement('div');
     card.className = 'tool-card animate-in';
-    // data-id 必须写上：流式检测结果回来时 updateSingleCard 靠它定位卡片，
-    // 缺了会导致每个结果都退化成全量 renderTools()，骨架屏当场塌缩成一张卡
     card.dataset.id = tool.id;
     card.innerHTML = `
       <div class="card-progress"></div>
       <div class="tool-card-body">
         <div class="tool-header">
-          <h3 class="tool-name">${escapeHtml(tool.name)}</h3>
+          <h3 class="tool-name">${buildToolTitleHtml(tool)}</h3>
           <span class="tool-status status-not-installed">等待检测</span>
         </div>
         <div class="version-info">
@@ -588,10 +638,7 @@ function renderSkeleton(tools) {
 }
 
 // ===== 工具状态分类（卡片渲染与统计摘要共用，保证口径一致） =====
-// rank 用于排序：可更新(0) → 未安装/检测失败(1) → 远端检测失败(2) → 本地较新(3) → 最新(4)
-// stat 用于统计条口径：与卡片状态徽章一一对应（"本地较新"计入 latest）
 function classifyTool(tool) {
-  // 当前平台不支持的工具（声明了 platforms 且不含当前平台）：显示"平台不支持"，不提供安装/更新
   if (tool.supported === false) {
     return { rank: 5, statusClass: 'status-unsupported', statusText: '平台不支持', canUpdate: false, canInstall: false, stat: 'unsupported', cardClass: 'card-unsupported' };
   }
@@ -599,7 +646,8 @@ function classifyTool(tool) {
     return { rank: 1, statusClass: 'status-not-installed', statusText: '未安装', canUpdate: false, canInstall: true, stat: 'install', cardClass: 'card-not-installed' };
   }
   if (tool.error && !tool.installed) {
-    return { rank: 1, statusClass: 'status-error', statusText: '检测失败', canUpdate: false, canInstall: true, stat: 'error', cardClass: 'card-error' };
+    // 命令存在于 PATH 但本地版本执行失败（超时/异常）：单卡允许手动重试更新，但不计入「未安装」以免被「一键安装全部」误重装
+    return { rank: 1, statusClass: 'status-error', statusText: '检测失败', canUpdate: true, canInstall: false, stat: 'error', cardClass: 'card-error' };
   }
   if (tool.needsUpdate) {
     return { rank: 0, statusClass: 'status-update', statusText: '可更新', canUpdate: true, canInstall: false, stat: 'update', cardClass: 'card-update' };
@@ -616,96 +664,93 @@ function classifyTool(tool) {
   return { rank: 1, statusClass: 'status-not-installed', statusText: '未安装', canUpdate: false, canInstall: true, stat: 'install', cardClass: 'card-not-installed' };
 }
 
-/**
- * 构建卡片操作区（.tool-actions）的 HTML
- * renderTools（全量渲染）与 updateSingleCard（流式局部更新）共用，
- * 避免两处各写一份模板导致长期漂移
- * @param {object} tool - 工具数据
- * @param {object} cls  - classifyTool(tool) 的结果
- * @returns {string} 操作区内部 HTML
- */
 function buildActionsHtml(tool, cls) {
   const id = escapeHtml(tool.id);
-  const locked = updatingTools.has(tool.id) ? 'disabled' : '';
+  const busyAction = updatingTools.get(tool.id);
+  const locked = (busyAction || isBatchRunning) ? 'disabled' : '';
+  const spinner = '<span class="spinner"></span>';
 
   let actionBtn;
   if (cls.canUpdate) {
-    actionBtn = `<button class="btn btn-primary btn-update btn-sm" data-id="${id}" ${locked}>更新</button>`;
+    const label = (busyAction === 'update' || busyAction === 'install') ? spinner : '更新';
+    actionBtn = `<button class="btn btn-primary btn-update btn-sm" data-id="${id}" ${locked}>${label}</button>`;
   } else if (cls.canInstall) {
-    actionBtn = `<button class="btn btn-success btn-install btn-sm" data-id="${id}" ${locked}>安装</button>`;
+    const label = busyAction === 'install' ? spinner : '安装';
+    actionBtn = `<button class="btn btn-success btn-install btn-sm" data-id="${id}" ${locked}>${label}</button>`;
   } else if (cls.stat === 'unsupported') {
-    // 当前平台不支持：按钮置灰且不可点击（无 data-id，事件委托不会响应）
     actionBtn = `<button class="btn btn-sm" disabled title="当前平台不支持安装 ${escapeHtml(tool.name)}">不支持</button>`;
   } else {
     actionBtn = `<button class="btn btn-primary btn-sm" disabled>已是最新</button>`;
   }
 
-  // 已安装的工具附加卸载按钮
+  const uninstallLabel = busyAction === 'uninstall' ? spinner : '卸载';
   const uninstallBtn = tool.installed
-    ? `<button class="btn btn-danger-ghost btn-uninstall btn-sm" data-id="${id}" ${locked}>卸载</button>`
+    ? `<button class="btn btn-danger-ghost btn-uninstall btn-sm" data-id="${id}" ${locked}>${uninstallLabel}</button>`
     : '';
 
-  // changelog 入口：脚本安装工具用官网，npm 工具指向 npmjs 包页
   const changelogUrl = tool.docsUrl || (tool.pkg ? `https://www.npmjs.com/package/${tool.pkg}` : '');
   const changelogLink = changelogUrl
     ? `<button class="btn btn-ghost btn-sm changelog-link" data-url="${escapeHtml(changelogUrl)}" title="查看 ${escapeHtml(tool.name)} 更新说明" type="button">🔗</button>`
     : '';
 
-  // 自定义工具附加删除按钮
   const removeBtn = tool.isCustom
-    ? `<button class="btn btn-danger-ghost btn-remove btn-sm" data-id="${id}" title="移除此自定义工具">🗑️</button>`
+    ? `<button class="btn btn-danger-ghost btn-remove btn-sm" data-id="${id}" ${locked} title="移除此自定义工具">🗑️</button>`
     : '';
 
   return actionBtn + uninstallBtn + changelogLink + removeBtn;
 }
 
-// ===== 工具状态与统计（渲染与局部更新共用，避免重复 classify） =====
 function getToolStates() {
   const ranked = toolsData.map(tool => ({ tool, cls: classifyTool(tool) }));
   const stats = { update: 0, install: 0, latest: 0, error: 0, unsupported: 0 };
   let updateCount = 0;
   let installCount = 0;
-  for (const { cls } of ranked) {
+  for (const { tool, cls } of ranked) {
     stats[cls.stat]++;
-    if (cls.canUpdate) updateCount++;
+    if (tool.needsUpdate) updateCount++;
     if (cls.canInstall) installCount++;
   }
   return { ranked, stats, updateCount, installCount };
 }
 
+/** 统一同步顶部工具栏按钮禁用状态，避免局部刷新误启用按钮 */
+function syncToolbarButtons(counts) {
+  const { updateCount, installCount } = counts || getToolStates();
+  const anyBusy = isChecking || isBatchRunning || updatingTools.size > 0;
+  if (btnCheck) btnCheck.disabled = anyBusy;
+  if (btnUpdateAll) btnUpdateAll.disabled = anyBusy || updateCount === 0;
+  if (btnInstallAll) btnInstallAll.disabled = anyBusy || installCount === 0;
+}
+
 // ===== 渲染工具卡片 =====
 function renderTools() {
-  // 只有首次渲染（骨架屏/空网格）才播放入场动画；局部刷新不重放，避免整页闪烁
   const animateIn = toolsGrid.childElementCount === 0;
   const scrollTop = toolsGrid.scrollTop;
   toolsGrid.innerHTML = '';
 
   const { ranked, stats, updateCount, installCount } = getToolStates();
-  // 按状态排序（稳定排序，同类内保持原顺序）
   ranked.sort((a, b) => a.cls.rank - b.cls.rank);
 
   for (let cardIdx = 0; cardIdx < ranked.length; cardIdx++) {
     const { tool, cls } = ranked[cardIdx];
 
-    // stats 栏过滤：如果当前有活跃过滤，只显示匹配类别的卡片
     if (statsFilter && cls.stat !== statsFilter) continue;
 
+    const isBusy = updatingTools.has(tool.id);
     const card = document.createElement('div');
-    card.className = `tool-card ${cls.cardClass}${animateIn ? ' animate-in' : ''}`;
+    card.className = `tool-card ${cls.cardClass}${isBusy ? ' updating' : ''}${animateIn ? ' animate-in' : ''}`;
     card.dataset.id = tool.id;
 
-    // 自定义工具标识
-    const customBadge = tool.isCustom ? '<span class="custom-badge">自定义</span>' : '';
-
-    // 可更新时"最新"版本号高亮
+    const statusClass = isBusy ? 'status-updating' : cls.statusClass;
+    const statusText = isBusy ? '执行中' : cls.statusText;
     const latestClass = cls.canUpdate ? 'version-value version-highlight' : 'version-value';
 
     card.innerHTML = `
       <div class="card-progress"></div>
       <div class="tool-card-body">
         <div class="tool-header">
-          <h3 class="tool-name"><span class="tool-icon" aria-hidden="true">${escapeHtml(tool.icon || tool.name.charAt(0).toUpperCase())}</span>${escapeHtml(tool.name)} ${customBadge}</h3>
-          <span class="tool-status ${cls.statusClass}">${cls.statusText}</span>
+          <h3 class="tool-name">${buildToolTitleHtml(tool)}</h3>
+          <span class="tool-status ${statusClass}">${statusText}</span>
         </div>
         <div class="version-info">
           <div class="version-item">
@@ -726,16 +771,10 @@ function renderTools() {
     if (animateIn) card.style.animationDelay = `${cardIdx * 30}ms`;
   }
 
-  // 卡片按钮通过 toolsGrid 上的事件委托统一处理（见 bindEvents），此处无需逐个绑定
-
-  btnUpdateAll.disabled = isChecking || updateCount === 0 || updatingTools.size > 0 || isBatchRunning;
-  // 当有未安装工具且不在更新状态时，启用一键安装
-  if (btnInstallAll) btnInstallAll.disabled = isChecking || installCount === 0 || updatingTools.size > 0 || isBatchRunning;
-
+  syncToolbarButtons({ updateCount, installCount });
   updateStatsBar(stats);
   updateLogToolFilter();
 
-  // 重绘后恢复滚动位置（过滤/批量刷新时避免列表跳回顶部）
   if (!animateIn) toolsGrid.scrollTop = scrollTop;
 }
 
@@ -755,14 +794,13 @@ function updateStatsBar(stats) {
   const statUnsupported = document.getElementById('stat-unsupported');
   if (statUnsupported) statUnsupported.textContent = stats.unsupported || 0;
 
-  // 更新各统计概率上的活跃状态（点击可过滤）
   const chips = bar.querySelectorAll('.stat-chip[data-filter]');
   chips.forEach(chip => {
-    const filter = chip.dataset.filter;
-    chip.classList.toggle('stat-chip-active', statsFilter === filter);
+    const active = statsFilter === chip.dataset.filter;
+    chip.classList.toggle('stat-chip-active', active);
+    chip.setAttribute('aria-pressed', active ? 'true' : 'false');
   });
 
-  // 统计条显隐会改变工具网格的起始位置，重新夹取日志高度避免溢出
   clampLogPanelHeight();
 }
 
@@ -770,20 +808,17 @@ function updateStatsBar(stats) {
 async function checkVersions() {
   if (isChecking) return;
   isChecking = true;
-  // 重置头部 stats 过滤，防止旧过滤干扰新结果
   statsFilter = null;
-  btnCheck.disabled = true;
+  syncToolbarButtons();
   btnCheck.innerHTML = '<span class="icon">⏳</span> 检测中...';
-  // 不再自动清空日志，方便对照历史输出；需要清空请点「清空」
   appendLog('info', 'system', '开始检测所有工具版本...');
 
-  // 流式检测：初始化工具数据（骨架屏状态）后，每检测完一个通过 onToolChecked 即时刷新对应卡片
-  // 最终 checkVersions 返回全部结果（用于应急投票原则等）
   try {
     const response = await window.electronAPI.checkVersions();
     if (!response || response.runId !== latestCheckRunId) return;
-    toolsData = response.results;
-    // 先解除检测状态再渲染，确保批量按钮按最终结果正确启用
+    for (const item of response.results || []) {
+      mergeToolResult(item);
+    }
     isChecking = false;
     renderTools();
     appendLog('success', 'system', '版本检测完成');
@@ -791,67 +826,73 @@ async function checkVersions() {
     appendLog('error', 'system', `检测失败: ${err.message}`);
   } finally {
     isChecking = false;
-    btnCheck.disabled = false;
     btnCheck.innerHTML = '<span class="icon">🔍</span> 检测版本';
+    syncToolbarButtons();
   }
 }
 
-/**
- * 流式检测回调：单个工具检测完成时立即更新对应卡片
- * @param {object} result - checkTool 返回的单个工具结果
- */
 function onSingleToolChecked(result) {
-  if (!result || !result.id) return;
-  const idx = toolsData.findIndex(t => t.id === result.id);
-  if (idx !== -1) {
-    toolsData[idx] = result;
-  } else {
-    // 首次检测时，数据可能还未充充，直接 push
-    toolsData.push(result);
-  }
-  // 局部更新对应卡片（流式更新不重渲染全部卡片，再比较性能）
+  if (!mergeToolResult(result)) return;
   updateSingleCard(result);
+}
+
+// ===== 工具级执行锁辅助 =====
+function setToolBusy(toolId, actionType) {
+  updatingTools.set(toolId, actionType);
+  syncToolbarButtons();
+
+  const card = toolsGrid.querySelector(`.tool-card[data-id="${CSS.escape(toolId)}"]`);
+  if (!card) return;
+  card.classList.add('updating');
+  const status = card.querySelector('.tool-status');
+  if (status) {
+    status.className = 'tool-status status-updating';
+    status.textContent = '执行中';
+  }
+  const targetSelector = actionType === 'uninstall' ? '.btn-uninstall' : '.btn-update, .btn-install';
+  const actionBtn = card.querySelector(targetSelector);
+  if (actionBtn) {
+    actionBtn.innerHTML = '<span class="spinner"></span>';
+  }
+  card.querySelectorAll('.btn-update, .btn-install, .btn-uninstall, .btn-remove').forEach(btn => {
+    btn.disabled = true;
+  });
+}
+
+function clearToolBusy(toolId) {
+  updatingTools.delete(toolId);
+  syncToolbarButtons();
 }
 
 // ===== 更新单个工具 =====
 async function updateTool(toolId) {
-  if (updatingTools.has(toolId)) return;
-  updatingTools.add(toolId);
-  updateUIState(true, toolId);
+  if (updatingTools.has(toolId) || isBatchRunning) return;
+  setToolBusy(toolId, 'update');
 
   try {
-    appendLog('start', toolId, `开始更新 ${getToolName(toolId)} ...`);
-    const result = await window.electronAPI.updateTool(toolId);
-    if (!result.success) {
-      appendLog('error', toolId, result.message || '更新失败');
-    }
+    await window.electronAPI.updateTool(toolId);
+    await refreshSingleTool(toolId, { rerender: false });
   } catch (err) {
     appendLog('error', toolId, `更新异常: ${err.message}`);
   } finally {
-    updatingTools.delete(toolId);
-    updateUIState(false, toolId);
-    await refreshSingleTool(toolId);
+    clearToolBusy(toolId);
+    renderTools();
   }
 }
 
-// ===== 安装单个工具（新增功能） =====
+// ===== 安装单个工具 =====
 async function installTool(toolId) {
-  if (updatingTools.has(toolId)) return;
-  updatingTools.add(toolId);
-  updateUIState(true, toolId);
+  if (updatingTools.has(toolId) || isBatchRunning) return;
+  setToolBusy(toolId, 'install');
 
   try {
-    appendLog('start', toolId, `开始安装 ${getToolName(toolId)} ...`);
-    const result = await window.electronAPI.installTool(toolId);
-    if (!result.success) {
-      appendLog('error', toolId, result.message || '安装失败');
-    }
+    await window.electronAPI.installTool(toolId);
+    await refreshSingleTool(toolId, { rerender: false });
   } catch (err) {
     appendLog('error', toolId, `安装异常: ${err.message}`);
   } finally {
-    updatingTools.delete(toolId);
-    updateUIState(false, toolId);
-    await refreshSingleTool(toolId);
+    clearToolBusy(toolId);
+    renderTools();
   }
 }
 
@@ -861,15 +902,10 @@ async function installAgyyolo() {
     btnInstallAgyyolo.disabled = true;
     appendLog('start', 'system', '正在检测 agy 是否安装 ...');
     const result = await window.electronAPI.installAgyyolo();
-    if (result.cancelled) {
+    if (result && result.cancelled) {
       appendLog('info', 'system', result.message || '已取消，未修改 Profile。');
-      return;
     }
-    for (const item of result.results || []) {
-      const status = item.ok ? 'OK' : 'FAIL';
-      appendLog(item.ok ? 'success' : 'error', 'system', `[${status}] ${item.profile} - ${item.reason}`);
-    }
-    appendLog(result.success ? 'success' : 'error', 'system', result.message || 'agyyolo 配置未能全部完成');
+    // 成功/失败逐项详情与汇总已由主进程通过 sendLog 流式推送，此处不再重复打印
   } catch (err) {
     appendLog('error', 'system', `配置 agyyolo 异常: ${err.message}`);
   } finally {
@@ -881,14 +917,9 @@ async function removeAgyyolo() {
   try {
     btnRemoveAgyyolo.disabled = true;
     const result = await window.electronAPI.removeAgyyolo();
-    if (result.cancelled) {
+    if (result && result.cancelled) {
       appendLog('info', 'system', result.message || '已取消，未修改 Profile。');
-      return;
     }
-    for (const item of result.results || []) {
-      appendLog(item.ok ? 'success' : 'error', 'system', `[${item.ok ? 'OK' : 'FAIL'}] ${item.profile} - ${item.reason}`);
-    }
-    appendLog(result.success ? 'success' : 'error', 'system', result.message || 'agyyolo 配置未能全部撤销');
   } catch (err) {
     appendLog('error', 'system', `撤销 agyyolo 配置异常: ${err.message}`);
   } finally {
@@ -897,30 +928,27 @@ async function removeAgyyolo() {
 }
 
 async function openPowerShell() {
+  const termName = window.electronAPI.platform === 'win32' ? 'PowerShell' : '终端';
   try {
-    appendLog('info', 'system', '正在打开 PowerShell 窗口...');
+    appendLog('info', 'system', `正在打开${termName}窗口...`);
     const result = await window.electronAPI.openPowerShell();
     if (result.success) {
-      appendLog('success', 'system', 'PowerShell 窗口已成功打开');
+      appendLog('success', 'system', `${termName}窗口已成功打开`);
     } else {
-      appendLog('error', 'system', `打开 PowerShell 失败: ${result.error}`);
+      appendLog('error', 'system', `打开${termName}失败: ${result.error}`);
     }
   } catch (err) {
-    appendLog('error', 'system', `打开 PowerShell 异常: ${err.message}`);
+    appendLog('error', 'system', `打开${termName}异常: ${err.message}`);
   }
 }
 
 // ===== 卸载单个工具 =====
 async function uninstallTool(toolId) {
-  if (updatingTools.has(toolId)) return;
-  const name = getToolName(toolId);
-  // showConfirmModal 的正文走 innerHTML，工具名（可能是用户自定义）必须转义
+  if (updatingTools.has(toolId) || isBatchRunning) return;
+  const tool = toolsData.find(t => t.id === toolId) || {};
+  const name = tool.name || getToolName(toolId);
   const safeName = escapeHtml(name);
-  // 使用自定义模态框替代原生 confirm()
-  // 三类工具的卸载语义不同，确认框要说清实际会发生什么：
-  // - npm 包：移除全局安装的包
-  // - AtomCode 等保留数据的脚本安装工具：移除程序本体，保留本地数据
-  // - 其余脚本安装工具：没有自动卸载命令，只能按官方指引手动处理
+
   let detail;
   if (!tool.installScript) {
     detail = `将卸载 <b>${safeName}</b>，其全局安装的 npm 包会被移除。`;
@@ -937,35 +965,28 @@ async function uninstallTool(toolId) {
   );
   if (!confirmed) return;
 
-  updatingTools.add(toolId);
-  updateUIState(true, toolId);
+  setToolBusy(toolId, 'uninstall');
 
   try {
-    appendLog('start', toolId, `开始卸载 ${name} ...`);
     const result = await window.electronAPI.uninstallTool(toolId);
-    if (!result.success) {
-      appendLog('error', toolId, result.message || '卸载失败');
-      // 脚本安装类工具：引导打开官方文档。
-      // message 里带着实际执行过的命令，必须转义（含 `<`）后再交给 innerHTML，否则会被当成标签吞掉
-      if (result.docsUrl) {
-        const detail = result.message
-          ? `<br><small style="color:var(--text-muted)">${escapeHtml(result.message)}</small>`
-          : '';
-        const goDoc = await showConfirmModal(
-          `${name} 需手动卸载`,
-          `自动卸载失败，是否打开官方文档按指引手动卸载？${detail}<br><small style="color:var(--text-muted)">${escapeHtml(result.docsUrl)}</small>`,
-          '打开官方文档',
-          'primary'
-        );
-        if (goDoc) await window.electronAPI.openExternal(result.docsUrl);
-      }
+    if (!result.success && result.docsUrl) {
+      const msgDetail = result.message
+        ? `<br><small style="color:var(--text-muted)">${escapeHtml(result.message)}</small>`
+        : '';
+      const goDoc = await showConfirmModal(
+        `${name} 需手动卸载`,
+        `自动卸载失败，是否打开官方文档按指引手动卸载？${msgDetail}<br><small style="color:var(--text-muted)">${escapeHtml(result.docsUrl)}</small>`,
+        '打开官方文档',
+        'primary'
+      );
+      if (goDoc) await window.electronAPI.openExternal(result.docsUrl);
     }
+    await refreshSingleTool(toolId, { rerender: false });
   } catch (err) {
     appendLog('error', toolId, `卸载异常: ${err.message}`);
   } finally {
-    updatingTools.delete(toolId);
-    updateUIState(false, toolId);
-    await refreshSingleTool(toolId);
+    clearToolBusy(toolId);
+    renderTools();
   }
 }
 
@@ -973,7 +994,7 @@ async function uninstallTool(toolId) {
 async function removeCustomTool(toolId) {
   const name = getToolName(toolId);
   const confirmed = await showConfirmModal(
-    `移除自定义工具`,
+    '移除自定义工具',
     `确定要从列表中移除「${escapeHtml(name)}」吗？<br><small style="color:var(--text-muted)">不会卸载已安装的 npm 包</small>`,
     '移除',
     'danger'
@@ -982,7 +1003,6 @@ async function removeCustomTool(toolId) {
   try {
     await window.electronAPI.removeCustomTool(toolId);
     appendLog('info', 'system', `自定义工具 "${name}" 已移除`);
-    // 从本地数据中移除并重新渲染
     toolsData = toolsData.filter(t => t.id !== toolId);
     renderTools();
   } catch (err) {
@@ -994,49 +1014,41 @@ async function removeCustomTool(toolId) {
 async function updateAll() {
   const ids = toolsData.filter(t => t.needsUpdate).map(t => t.id);
   await runBatch(ids, btnUpdateAll, window.electronAPI.updateTool, {
-    verb: '更新', idleHtml: '<span class="icon">🚀</span> 一键更新全部'
+    verb: '更新', actionType: 'update', idleHtml: '<span class="icon">🚀</span> 一键更新全部'
   });
 }
 
 // ===== 一键安装全部未安装工具 =====
 async function installAll() {
-  // 仅安装未安装且当前平台支持的工具（不支持的跳过）
-  const ids = toolsData.filter(t => !t.installed && t.supported !== false).map(t => t.id);
+  // 仅批量安装明确未安装（notFound）且当前平台支持的工具，避免误重装检测异常的已装工具
+  const ids = toolsData.filter(t => classifyTool(t).canInstall).map(t => t.id);
   await runBatch(ids, btnInstallAll, window.electronAPI.installTool, {
-    verb: '安装', idleHtml: '<span class="icon">📦</span> 一键安装全部'
+    verb: '安装', actionType: 'install', idleHtml: '<span class="icon">📦</span> 一键安装全部'
   });
 }
 
-/**
- * 逐个执行批量安装/更新（updateAll 与 installAll 共用）
- * 每个工具独立 try/finally：单个工具 IPC 异常不会中断后续工具，也不会让它的操作锁永远不释放
- * @param {string[]} ids - 待处理的工具 ID
- * @param {HTMLButtonElement} button - 顶部批量按钮（显示进度）
- * @param {(toolId: string) => Promise<object>} action - updateTool / installTool
- * @param {{ verb: string, idleHtml: string }} labels
- */
-async function runBatch(ids, button, action, { verb, idleHtml }) {
+async function runBatch(ids, button, action, { verb, actionType, idleHtml }) {
   if (ids.length === 0 || isBatchRunning || updatingTools.size > 0) return;
 
   isBatchRunning = true;
+  syncToolbarButtons();
+  // 锁定所有卡片操作按钮，避免批量执行期间插入其它操作
+  toolsGrid.querySelectorAll('.btn-update, .btn-install, .btn-uninstall, .btn-remove').forEach(btn => {
+    btn.disabled = true;
+  });
   appendLog('start', 'system', `开始一键${verb} ${ids.length} 个工具...`);
 
   try {
     for (let i = 0; i < ids.length; i++) {
       const toolId = ids[i];
       button.innerHTML = `<span class="icon">⏳</span> ${verb}中 (${i + 1}/${ids.length})`;
-      updatingTools.add(toolId);
-      updateUIState(true, toolId);
-      appendLog('start', toolId, `开始${verb} ${getToolName(toolId)} ...`);
+      setToolBusy(toolId, actionType);
       try {
-        const result = await action(toolId);
-        if (!result.success) {
-          appendLog('error', toolId, result.message || `${verb}失败`);
-        }
+        await action(toolId);
       } catch (err) {
         appendLog('error', toolId, `${verb}异常: ${err.message}`);
       } finally {
-        updatingTools.delete(toolId);
+        clearToolBusy(toolId);
       }
       await refreshSingleTool(toolId, { rerender: false });
     }
@@ -1044,66 +1056,21 @@ async function runBatch(ids, button, action, { verb, idleHtml }) {
   } finally {
     isBatchRunning = false;
     button.innerHTML = idleHtml;
-    updateUIState(false);
-    // 循环中每个工具都已经 refreshSingleTool 过了，这里只需重排/重绘，
-    // 不必再对全部工具（含没动过的）跑一次完整检测
     renderTools();
   }
 }
 
 // ===== 刷新单个工具 =====
-/**
- * 重新检测单个工具并更新卡片
- * @param {string} toolId
- * @param {object} [options] - { rerender } 是否立即全量重排；批量更新时置 false，结束后统一渲染一次
- */
 async function refreshSingleTool(toolId, { rerender = true } = {}) {
   try {
-    const response = await window.electronAPI.checkVersion(toolId);
-    if (!response || response.runId !== latestCheckRunId) return;
-    const { runId, ...updated } = response;
-    const idx = toolsData.findIndex(t => t.id === toolId);
-    if (idx !== -1) {
-      toolsData[idx] = updated;
-    } else {
-      toolsData.push(updated);
-    }
-    // 局部更新卡片与统计，避免批量更新时 N 次全量重绘
-    updateSingleCard(updated);
+    const updated = await window.electronAPI.checkVersion(toolId);
+    if (!updated || !updated.id) return;
+    if (!mergeToolResult(updated)) return;
+    updateSingleCard(toolsData.find(t => t.id === toolId) || updated);
     if (rerender) renderTools();
   } catch (err) {
     appendLog('error', toolId, `刷新版本失败: ${err.message}`);
   }
-}
-
-// ===== UI 状态更新 =====
-function updateUIState(updating, activeToolId) {
-  btnCheck.disabled = updating;
-  btnUpdateAll.disabled = updating;
-  if (btnInstallAll) btnInstallAll.disabled = updating;
-
-  document.querySelectorAll('.tool-card').forEach(card => {
-    const id = card.dataset.id;
-    const btns = card.querySelectorAll('.btn-update, .btn-install, .btn-uninstall');
-    const status = card.querySelector('.tool-status');
-
-    if (updating && activeToolId && id === activeToolId) {
-      card.classList.add('updating');
-      if (status) {
-        status.className = 'tool-status status-updating';
-        status.textContent = '执行中';
-      }
-      // 动作按钮替换为 spinner，提供明确的执行中反馈（结束后 refreshSingleTool 会重渲染恢复）
-      const actionBtn = card.querySelector('.btn-update, .btn-install');
-      if (actionBtn) {
-        actionBtn.innerHTML = '<span class="spinner"></span>';
-      }
-    } else if (!updating) {
-      card.classList.remove('updating');
-    }
-
-    btns.forEach(btn => { btn.disabled = updating; });
-  });
 }
 
 // ===== 日志相关 =====
@@ -1112,13 +1079,6 @@ function clearLog() {
   renderLogs();
 }
 
-/**
- * 追加日志（增量渲染）
- *
- * 早期实现每来一条日志就整体重建全部条目（上限 2000）的 DOM，安装时 npm 的流式输出
- * 会把它变成 O(n^2) —— 界面明显卡顿。这里改为只为新增行创建节点并 append，
- * 只有过滤条件变化或清空时才走 renderLogs() 全量重建。
- */
 function appendLog(type, toolId, message, time) {
   if (!message || message.trim() === '') return;
 
@@ -1126,7 +1086,6 @@ function appendLog(type, toolId, message, time) {
   const lines = message.split(/\r?\n/).filter(line => line.trim() !== '');
   if (lines.length === 0) return;
 
-  // 追加前先判断视图是否贴在底部，决定之后要不要自动滚动
   const stickToBottom = isLogScrolledToBottom();
 
   const fragment = document.createDocumentFragment();
@@ -1134,14 +1093,12 @@ function appendLog(type, toolId, message, time) {
   for (const line of lines) {
     const entry = { type, toolId, message: line, time: stamp };
     logEntries.push(entry);
-    // 命中当前过滤条件的才进入视图（数据始终保留全量，复制/导出不受影响）
     if (logMatchesFilters(entry)) {
       fragment.appendChild(buildLogLine(entry));
       added++;
     }
   }
 
-  // 超出上限从头部截断（数据与 DOM 同步裁剪）
   let dropped = 0;
   if (logEntries.length > MAX_LOG_ENTRIES) {
     const removed = logEntries.splice(0, logEntries.length - MAX_LOG_ENTRIES);
@@ -1150,7 +1107,6 @@ function appendLog(type, toolId, message, time) {
 
   if (added === 0 && dropped === 0) return;
 
-  // 有新内容要显示时，先清掉空状态占位
   if (visibleLogCount === 0 && added > 0) logContainer.innerHTML = '';
   for (let i = 0; i < dropped && logContainer.firstChild; i++) {
     logContainer.removeChild(logContainer.firstChild);
@@ -1162,11 +1118,9 @@ function appendLog(type, toolId, message, time) {
     renderLogEmptyState();
     return;
   }
-  // 只在用户本来就贴着底部时才跟随滚动，否则不打断用户回看历史日志
   if (stickToBottom) logContainer.scrollTop = logContainer.scrollHeight;
 }
 
-/** 单条日志是否命中当前过滤条件 */
 function logMatchesFilters(entry) {
   if (logFilters.level && entry.type !== logFilters.level) return false;
   if (logFilters.tool && entry.toolId !== logFilters.tool) return false;
@@ -1175,20 +1129,14 @@ function logMatchesFilters(entry) {
   return true;
 }
 
-/** 日志视图是否已滚动到底部（留 40px 容差） */
 function isLogScrolledToBottom() {
   return logContainer.scrollHeight - logContainer.scrollTop - logContainer.clientHeight < 40;
 }
 
-/** 渲染空状态占位 */
 function renderLogEmptyState() {
   logContainer.innerHTML = `<div class="log-empty">${logEntries.length === 0 ? '点击「检测版本」开始' : '没有匹配过滤条件的日志'}</div>`;
 }
 
-/**
- * 按当前过滤条件全量重建日志视图（过滤只影响视图，不改变数据）
- * 仅在过滤条件变化或清空日志时调用；正常追加走 appendLog 的增量路径
- */
 function renderLogs() {
   const fragment = document.createDocumentFragment();
   visibleLogCount = 0;
@@ -1208,7 +1156,6 @@ function renderLogs() {
   logContainer.scrollTop = logContainer.scrollHeight;
 }
 
-/** 构建单行日志 DOM（全程转义，防注入） */
 function buildLogLine(entry) {
   const div = document.createElement('div');
   div.className = `log-line log-${entry.type}`;
@@ -1221,7 +1168,6 @@ function buildLogLine(entry) {
   return div;
 }
 
-/** 同步工具过滤器选项（随工具列表变化；尽量保留当前选择） */
 function updateLogToolFilter() {
   if (!logFilterTool) return;
   const current = logFilterTool.value;
@@ -1233,13 +1179,11 @@ function updateLogToolFilter() {
     logFilterTool.appendChild(opt);
   }
   logFilterTool.value = current;
-  // 若所选工具已被移除（如自定义工具删除），回退到"全部工具"
   if (logFilterTool.value !== current) {
     logFilters.tool = '';
   }
 }
 
-// 获取日志纯文本（始终导出全部条目，不受过滤器影响）
 function getLogText() {
   return logEntries.map(e => {
     const toolName = e.toolId === 'system' ? 'SYSTEM' : getToolName(e.toolId);
@@ -1247,7 +1191,6 @@ function getLogText() {
   }).join('\n');
 }
 
-// 复制日志到剪贴板
 async function copyLog() {
   const text = getLogText();
   if (!text) {
@@ -1262,7 +1205,6 @@ async function copyLog() {
   }
 }
 
-// 导出日志到文件
 async function exportLog() {
   const text = getLogText();
   if (!text) {
@@ -1271,8 +1213,8 @@ async function exportLog() {
   }
   try {
     const result = await window.electronAPI.exportLog(text);
-    if (result.success) {
-      appendLog('success', 'system', `日志已导出到: ${result.filePath}`);
+    if (result && result.cancelled) {
+      appendLog('info', 'system', '已取消导出日志');
     }
   } catch (err) {
     appendLog('error', 'system', `导出失败: ${err.message}`);
@@ -1298,7 +1240,6 @@ async function exportVersionReport() {
   ];
   for (const t of toolsData) {
     const cls = classifyTool(t);
-    // 表格内容转义竖线，防止工具名/版本号破坏表格结构
     const esc = (v) => String(v || '-').replace(/\|/g, '\\|');
     lines.push(`| ${esc(t.name)} | ${cls.statusText} | ${esc(t.currentVersion)} | ${esc(t.latestVersion)} |`);
   }
@@ -1307,7 +1248,7 @@ async function exportVersionReport() {
       text: lines.join('\n'),
       defaultName: `ai-tools-report-${new Date().toISOString().slice(0, 10)}.md`
     });
-    if (!result || !result.success) appendLog('info', 'system', '已取消导出版本报告');
+    if (result && result.cancelled) appendLog('info', 'system', '已取消导出版本报告');
   } catch (err) {
     appendLog('error', 'system', `导出报告失败: ${err.message}`);
   }
@@ -1329,11 +1270,6 @@ function escapeHtml(text) {
 }
 
 // ===== 流式检测：局部更新单张卡片 =====
-/**
- * 单个工具检测完成后，局部更新对应卡片而非重渲染全部
- * 如果卡片不存在（骨架屏已销毁），降级为全量 renderTools
- * @param {object} tool - 检测结果
- */
 function updateSingleCard(tool) {
   const existing = toolsGrid.querySelector(`.tool-card[data-id="${CSS.escape(tool.id)}"]`);
   if (!existing) {
@@ -1341,19 +1277,22 @@ function updateSingleCard(tool) {
     return;
   }
   const cls = classifyTool(tool);
+  const isBusy = updatingTools.has(tool.id);
 
-  // 更新状态徽章
-  const statusEl = existing.querySelector('.tool-status');
-  if (statusEl) {
-    statusEl.className = `tool-status ${cls.statusClass}`;
-    statusEl.textContent = cls.statusText;
+  const nameEl = existing.querySelector('.tool-name');
+  if (nameEl) {
+    nameEl.innerHTML = buildToolTitleHtml(tool);
   }
 
-  // 更新卡片边条颜色（保留 updating 与入场动画状态）
-  const keepAnim = existing.classList.contains('animate-in') ? ' animate-in' : '';
-  existing.className = `tool-card ${cls.cardClass}${existing.classList.contains('updating') ? ' updating' : ''}${keepAnim}`;
+  const statusEl = existing.querySelector('.tool-status');
+  if (statusEl) {
+    statusEl.className = `tool-status ${isBusy ? 'status-updating' : cls.statusClass}`;
+    statusEl.textContent = isBusy ? '执行中' : cls.statusText;
+  }
 
-  // 更新版本号
+  const keepAnim = existing.classList.contains('animate-in') ? ' animate-in' : '';
+  existing.className = `tool-card ${cls.cardClass}${isBusy ? ' updating' : ''}${keepAnim}`;
+
   const versionValues = existing.querySelectorAll('.version-value');
   if (versionValues.length >= 2) {
     versionValues[0].textContent = tool.currentVersion || '-';
@@ -1363,28 +1302,26 @@ function updateSingleCard(tool) {
     versionValues[1].title = tool.latestVersion || '';
   }
 
-  // 更新操作按钮区域（局部替换）
-  // 事件由 toolsGrid 上的委托统一处理，替换 innerHTML 后无需重新绑定
   const actionsEl = existing.querySelector('.tool-actions');
   if (actionsEl) {
     actionsEl.innerHTML = buildActionsHtml(tool, cls);
   }
 
-  // 同步统计条与顶部按钮状态
   const { stats, updateCount, installCount } = getToolStates();
   updateStatsBar(stats);
-  btnUpdateAll.disabled = isChecking || updateCount === 0 || updatingTools.size > 0 || isBatchRunning;
-  if (btnInstallAll) btnInstallAll.disabled = isChecking || installCount === 0 || updatingTools.size > 0 || isBatchRunning;
+  syncToolbarButtons({ updateCount, installCount });
 }
 
 // ===== 高亮并滚动到指定工具卡片（通知点击后定位） =====
-/**
- * 高亮指定工具的卡片并滚动至可视区域
- * @param {string} toolId - 要高亮的工具 ID
- */
 function highlightToolCard(toolId) {
   if (!toolId) return;
-  const card = toolsGrid.querySelector(`.tool-card[data-id="${CSS.escape(toolId)}"]`);
+  let card = toolsGrid.querySelector(`.tool-card[data-id="${CSS.escape(toolId)}"]`);
+  // 若当前处于过滤视图且目标卡片被隐藏，自动解除过滤以确保定位可见
+  if (!card && statsFilter) {
+    statsFilter = null;
+    renderTools();
+    card = toolsGrid.querySelector(`.tool-card[data-id="${CSS.escape(toolId)}"]`);
+  }
   if (!card) return;
   card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   card.classList.add('card-highlighted');
@@ -1393,14 +1330,7 @@ function highlightToolCard(toolId) {
   }, { once: true });
 }
 
-// ===== 自定义确认弹框（替代原生 confirm()） =====
-/**
- * 显示样式统一的确认弹框，返回 Promise<boolean>
- * @param {string} title          - 弹框标题
- * @param {string} message        - 弹框正文（支持 HTML）
- * @param {string} confirmText    - 确认按钮文字
- * @param {'danger'|'primary'} confirmVariant - 确认按钮风格
- */
+// ===== 自定义确认弹框 =====
 function showConfirmModal(title, message, confirmText = '确认', confirmVariant = 'primary') {
   return new Promise((resolve) => {
     const overlay   = document.getElementById('confirm-overlay');
@@ -1411,7 +1341,6 @@ function showConfirmModal(title, message, confirmText = '确认', confirmVariant
     const btnClose  = document.getElementById('btn-confirm-close');
 
     if (!overlay) {
-      // 降级：DOM 中无确认弹框时使用原生 confirm
       resolve(window.confirm(`${title}\n${message.replace(/<[^>]*>/g, '')}`));
       return;
     }
@@ -1437,8 +1366,6 @@ function showConfirmModal(title, message, confirmText = '确认', confirmVariant
     const onKeydown = (e) => {
       if (e.key === 'Escape') cleanup(false);
       if (e.key === 'Enter') {
-        // 焦点在弹框按钮上时交给按钮自身处理：危险操作默认聚焦「取消」，
-        // 若这里一律 cleanup(true)，按回车反而会确认卸载
         if (e.target instanceof HTMLButtonElement && overlay.contains(e.target)) return;
         cleanup(true);
       }
@@ -1450,13 +1377,11 @@ function showConfirmModal(title, message, confirmText = '确认', confirmVariant
     overlay.addEventListener('click', onOverlay);
     document.addEventListener('keydown', onKeydown);
 
-    // 危险操作默认聚焦取消按钮，避免误操作
     (confirmVariant === 'danger' ? btnCancel : btnOk).focus();
   });
 }
 
 // ===== Stats 栏点击过滤绑定 =====
-// 点击统计类别 chip 切换过滤；再次点击取消过滤
 (function bindStatsFilter() {
   const bar = document.getElementById('stats-bar');
   if (!bar) return;
@@ -1466,35 +1391,27 @@ function showConfirmModal(title, message, confirmText = '确认', confirmVariant
     const filter = chip.dataset.filter;
     statsFilter = (statsFilter === filter) ? null : filter;
     renderTools();
-    // 读取当前统计数字再更新 chip 活跃状态
-    updateStatsBar({
-      update:  parseInt(document.getElementById('stat-update').textContent,  10) || 0,
-      install: parseInt(document.getElementById('stat-install').textContent, 10) || 0,
-      latest:  parseInt(document.getElementById('stat-latest').textContent,  10) || 0,
-      error:   parseInt(document.getElementById('stat-error').textContent,   10) || 0,
-      unsupported: parseInt((document.getElementById('stat-unsupported') || {}).textContent || '0', 10) || 0,
-    });
   });
 })();
 
-// ===== 镜像源测速 =====
-/**
- * 测速全部预设镜像源，返回 [{ name, url, success, ms, message }]
- * 供「测速」展示与「自动选最快」共用，避免两处重复实现
- */
+// ===== 镜像源测速（含用户当前自定义镜像源） =====
 async function measureAllRegistries() {
-  const registries = await window.electronAPI.getRegistries();
+  const [presets, current] = await Promise.all([
+    window.electronAPI.getRegistries(),
+    window.electronAPI.getCurrentRegistry()
+  ]);
+  const targets = [...presets];
+  if (current && !presets.some(r => r.url === current)) {
+    targets.push({ name: `自定义: ${current}`, url: current });
+  }
   return Promise.all(
-    registries.map(async (reg) => {
+    targets.map(async (reg) => {
       const res = await window.electronAPI.pingRegistry(reg.url);
       return { name: reg.name, url: reg.url, ...res };
     })
   );
 }
 
-/**
- * 对所有预设镜像源进行延迟测试，在设置弹框中展示结果
- */
 async function pingAllRegistries() {
   const speedResults = document.getElementById('registry-speed-results');
   if (!speedResults) return;
@@ -1513,8 +1430,8 @@ async function pingAllRegistries() {
       const icon = r.success ? (level === 'fast' ? '🟢' : level === 'medium' ? '🟡' : '🔴') : '❌';
       return `<div class="ping-row">
         <span class="ping-icon">${icon}</span>
-        <span class="ping-name">${escapeHtml(r.name)}</span>
-        <span class="ping-ms ping-${level}">${r.success ? ms : (r.message || '超时')}</span>
+        <span class="ping-name" title="${escapeHtml(r.name)}">${escapeHtml(r.name)}</span>
+        <span class="ping-ms ping-${level}">${r.success ? ms : escapeHtml(r.message || '超时')}</span>
       </div>`;
     }).join('');
   } catch (err) {
@@ -1524,9 +1441,6 @@ async function pingAllRegistries() {
   }
 }
 
-/**
- * 自动测速并切换到最快的镜像源
- */
 async function autoSelectFastestRegistry() {
   const btnAuto = document.getElementById('btn-auto-registry');
   if (btnAuto) { btnAuto.disabled = true; btnAuto.textContent = '选择中...'; }

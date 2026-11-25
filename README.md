@@ -11,7 +11,7 @@
 
 - 自动检测 AI 编程工具本地/远端版本（semver 比较含预发布规则，仅提示真正有更新的工具）
 - 一键安装、更新、卸载（npm 全局包）
-- 支持多种 AI 编程助手：Kimi、Claude、Cline、Cursor、Codex、OpenCode、CodeBuddy、Qwen、Antigravity、AtomCode、Qoder、Grok、Command Code、MiMo Code 等
+- 支持多种 AI 编程助手：Kimi、Claude、Cline、Cursor、Codex、OpenCode、CodeBuddy、Qwen、Antigravity、AtomCode、Qoder、Grok、Command Code、MiMo Code、CNB CLI 等
 - 自定义 npm 工具与自定义镜像源
 - npm 更新先从所选 HTTPS registry 解析版本，再安装精确版本；官方安装脚本先下载到临时文件并检查 HTTPS/响应完整性后执行
 - 卡片按状态排序（可更新置顶）+ 检测统计摘要、执行中进度反馈、changelog 快捷链接
@@ -71,7 +71,7 @@ npm run build
 
 构建产物输出到 `dist/` 目录。`build:win` 目标为 Windows x64（NSIS 安装包和 portable）；`build:mac` 目标为 macOS x64 / arm64（dmg 和 zip），macOS 目标需在 macOS 上构建。`npm run build` 只按当前构建主机和 electron-builder 默认目标构建，不会自动同时产出 Windows 与 macOS 包。
 
-运行 `npm test` 可执行语义版本、HTTPS registry、IPC/自定义配置、检测并发、agyyolo Profile 撤销和 POSIX 子进程组清理回归测试。
+运行 `npm test` 可执行 JS 语法检查、语义版本与多行版本提取、HTTPS registry 与输入校验、IPC/自定义配置防护、PATH 内存扫描与并发限流、渲染层交互状态（卸载确认/批量过滤/序号合并/模态框内联报错）、`agyyolo`/`cmdcyolo` Profile 可逆管理及 POSIX 子进程组清理回归测试。
 
 ### Windows 代码签名
 

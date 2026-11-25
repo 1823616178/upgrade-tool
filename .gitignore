@@ -8,6 +8,7 @@ build/*.p12
 build/*.pfx
 build/.cert-password
 *.pfx
-# Command Code 本地配置（taste 学习记录等，勿提交）
+# Command Code / Claude Code 本地配置（请勿提交）
 .commandcode/
+.claude/
 *.p12

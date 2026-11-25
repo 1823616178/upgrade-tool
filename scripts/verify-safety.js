@@ -1,4 +1,4 @@
-// Lightweight security/reliability regression checks without Electron or a test framework.
+// Lightweight security/reliability regression checks without Electron or external test frameworks.
 // Run via `npm test`.
 const assert = require('assert');
 const fs = require('fs');
@@ -7,37 +7,47 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { pathToFileURL } = require('url');
 
-const mainPath = path.join(__dirname, '..', 'main.js');
-const mainSource = fs.readFileSync(mainPath, 'utf8');
-const preloadSource = fs.readFileSync(path.join(__dirname, '..', 'preload.js'), 'utf8');
-const rendererSource = fs.readFileSync(path.join(__dirname, '..', 'script.js'), 'utf8');
-const standaloneAgyyoloSource = fs.readFileSync(path.join(__dirname, 'setup-agyyolo.ps1'), 'utf8');
+const {
+  isValidRegistryUrl,
+  isValidNpmPackage,
+  isValidCliCommand,
+  isValidVersionArg,
+  isPlainObject,
+  hasOnlyFields,
+  isValidToolName,
+  createConcurrencyLimiter,
+  isCurrentCheckRun
+} = require('../lib/validators');
+const {
+  installAgyyoloToProfile,
+  removeAgyyoloFromProfile,
+  profileResultsSucceeded
+} = require('../lib/ps-profile');
+const {
+  findCommandInPath,
+  killProcessTree,
+  spawnDetachedSafely
+} = require('../lib/process-utils');
+const {
+  BUILTIN_TOOLS,
+  resolveSpecialRemoteVersion
+} = require('../lib/tools-catalog');
 
-function extractFunction(name) {
+const rootDir = path.join(__dirname, '..');
+const mainSource = fs.readFileSync(path.join(rootDir, 'main.js'), 'utf8');
+const preloadSource = fs.readFileSync(path.join(rootDir, 'preload.js'), 'utf8');
+const rendererSource = fs.readFileSync(path.join(rootDir, 'script.js'), 'utf8');
+const htmlSource = fs.readFileSync(path.join(rootDir, 'index.html'), 'utf8');
+const pkgJson = JSON.parse(fs.readFileSync(path.join(rootDir, 'package.json'), 'utf8'));
+const standaloneAgyyoloSource = fs.readFileSync(path.join(__dirname, 'setup-agyyolo.ps1'), 'utf8');
+const standaloneCmdcyoloSource = fs.readFileSync(path.join(__dirname, 'setup-cmdcyolo.ps1'), 'utf8');
+
+function extractMainFunction(name) {
   const pattern = new RegExp(`(?:async\\s+)?function ${name}\\([\\s\\S]*?^}`, 'm');
   const match = mainSource.match(pattern);
-  assert(match, `missing function ${name}`);
+  assert(match, `missing function ${name} in main.js`);
   return match[0];
 }
-
-const helperNames = [
-  'isValidRegistryUrl', 'isValidNpmPackage', 'isValidCliCommand', 'isValidVersionArg',
-  'isPlainObject', 'hasOnlyFields', 'isValidToolName', 'parseSemver', 'createConcurrencyLimiter',
-  'isCurrentCheckRun', 'profileResultsSucceeded', 'killProcessTree', 'ensureProfile',
-  'readProfileContent', 'writeProfileAtomically', 'getAgyyoloManagedState', 'installAgyyoloToProfile', 'removeAgyyoloFromProfile'
-];
-const constants = [
-  'AGYYOLO_BEGIN_MARKER', 'AGYYOLO_END_MARKER', 'AGYYOLO_FUNCTION_BODY',
-  'AGYYOLO_LEGACY_PATTERN', 'AGYYOLO_MANAGED_PATTERN'
-].map(name => {
-  const match = mainSource.match(new RegExp(`^const ${name} = .*;$`, 'm'));
-  assert(match, `missing constant ${name}`);
-  return match[0];
-}).join('\n');
-const helpers = new Function(
-  'fs', 'path', 'os', 'spawn', 'process', 'setTimeout',
-  `${constants}\n${helperNames.map(extractFunction).join('\n')}\nreturn { ${helperNames.join(', ')} };`
-)(fs, path, os, spawn, process, setTimeout);
 
 function check(name, fn) {
   try {
@@ -60,36 +70,33 @@ async function checkAsync(name, fn) {
 }
 
 check('registry requires HTTPS and rejects credentials/query/fragment', () => {
-  assert.strictEqual(helpers.isValidRegistryUrl('https://registry.npmjs.org/'), true);
-  assert.strictEqual(helpers.isValidRegistryUrl('http://registry.npmjs.org/'), false);
-  assert.strictEqual(helpers.isValidRegistryUrl('https://user:pass@example.com/'), false);
-  assert.strictEqual(helpers.isValidRegistryUrl('https://example.com/?token=x'), false);
-  assert.strictEqual(helpers.isValidRegistryUrl('https://example.com/#fragment'), false);
+  assert.strictEqual(isValidRegistryUrl('https://registry.npmjs.org/'), true);
+  assert.strictEqual(isValidRegistryUrl('http://registry.npmjs.org/'), false);
+  assert.strictEqual(isValidRegistryUrl('https://user:pass@example.com/'), false);
+  assert.strictEqual(isValidRegistryUrl('https://example.com/?token=x'), false);
+  assert.strictEqual(isValidRegistryUrl('https://example.com/#fragment'), false);
 });
 
 check('custom tool primitives reject invalid or oversized values', () => {
-  assert.strictEqual(helpers.isPlainObject({ name: 'tool' }), true);
-  assert.strictEqual(helpers.isPlainObject([]), false);
-  assert.strictEqual(helpers.hasOnlyFields({ name: 'tool' }, ['name']), true);
-  assert.strictEqual(helpers.hasOnlyFields({ name: 'tool', installScript: 'evil' }, ['name']), false);
-  assert.strictEqual(helpers.isValidToolName('My CLI'), true);
-  assert.strictEqual(helpers.isValidToolName('x'.repeat(81)), false);
-  assert.strictEqual(helpers.isValidNpmPackage('@scope/pkg'), true);
-  assert.strictEqual(helpers.isValidNpmPackage('bad;command'), false);
-  assert.strictEqual(helpers.isValidCliCommand('my-cli'), true);
-  assert.strictEqual(helpers.isValidVersionArg('--version'), true);
+  assert.strictEqual(isPlainObject({ name: 'tool' }), true);
+  assert.strictEqual(isPlainObject([]), false);
+  assert.strictEqual(hasOnlyFields({ name: 'tool' }, ['name']), true);
+  assert.strictEqual(hasOnlyFields({ name: 'tool', installScript: 'evil' }, ['name']), false);
+  assert.strictEqual(isValidToolName('My CLI'), true);
+  assert.strictEqual(isValidToolName('x'.repeat(81)), false);
+  assert.strictEqual(isValidNpmPackage('@scope/pkg'), true);
+  assert.strictEqual(isValidNpmPackage('bad;command'), false);
+  assert.strictEqual(isValidCliCommand('my-cli'), true);
+  assert.strictEqual(isValidVersionArg('--version'), true);
 });
 
 check('check generation accepts only the current run', () => {
-  assert.strictEqual(helpers.isCurrentCheckRun(12, 12), true);
-  assert.strictEqual(helpers.isCurrentCheckRun(11, 12), false);
+  assert.strictEqual(isCurrentCheckRun(12, 12), true);
+  assert.strictEqual(isCurrentCheckRun(11, 12), false);
 });
 
 checkAsync('Cursor uses official install sources and parses the published version', async () => {
-  const match = mainSource.match(/const BUILTIN_TOOLS = (\[[\s\S]*?\n\]);/);
-  assert(match, 'missing built-in tool list');
-  const tools = new Function(`return ${match[1]};`)();
-  const cursor = tools.find(tool => tool.id === 'cursor');
+  const cursor = BUILTIN_TOOLS.find(tool => tool.id === 'cursor');
   assert(cursor, 'missing Cursor CLI');
   assert.strictEqual(cursor.cmd, 'cursor-agent');
   assert.strictEqual(cursor.altCmds, undefined);
@@ -97,32 +104,48 @@ checkAsync('Cursor uses official install sources and parses the published versio
   assert.strictEqual(cursor.installScript.unixUrl, 'https://cursor.com/install');
 
   let script = "$downloadUrl = 'https://downloads.cursor.com/lab/2026.11.05-86047df/'";
-  const checkLatestVersion = new Function(
-    'os', 'fetchWithTimeout', 'parseSemver',
-    `${extractFunction('checkLatestVersion')}\nreturn checkLatestVersion;`
-  )(
-    { platform: () => 'win32' },
-    async url => {
-      assert.strictEqual(url, cursor.installScript.winUrl);
-      return { ok: true, text: async () => script };
-    },
-    helpers.parseSemver
+  const fetchMock = async url => {
+    assert.strictEqual(url, cursor.installScript.winUrl);
+    return { ok: true, text: async () => script };
+  };
+  assert.deepStrictEqual(
+    await resolveSpecialRemoteVersion(cursor, { fetchWithTimeout: fetchMock, platform: 'win32' }),
+    { latest: '2026.11.05-86047df' }
   );
-  assert.deepStrictEqual(await checkLatestVersion(cursor), { latest: '2026.11.05-86047df' });
 
   script = 'installer response without a version';
-  const invalid = await checkLatestVersion(cursor);
+  const invalid = await resolveSpecialRemoteVersion(cursor, { fetchWithTimeout: fetchMock, platform: 'win32' });
   assert.strictEqual(invalid.latest, null);
   assert.match(invalid.error, /无有效版本号/);
 });
 
-check('per-profile result aggregation rejects empty and partial success', () => {
-  assert.strictEqual(helpers.profileResultsSucceeded([]), false);
-  assert.strictEqual(helpers.profileResultsSucceeded([{ ok: true }, { ok: false }]), false);
-  assert.strictEqual(helpers.profileResultsSucceeded([{ ok: true }, { ok: true }]), true);
+check('CNB CLI uses the official npm package and version flag', () => {
+  const cnb = BUILTIN_TOOLS.find(tool => tool.id === 'cnb');
+  assert(cnb, 'missing CNB CLI');
+  assert.strictEqual(cnb.name, 'CNB CLI');
+  assert.strictEqual(cnb.cmd, 'cnb');
+  assert.strictEqual(cnb.pkg, '@cnbcool/cnb-cli');
+  assert.strictEqual(cnb.versionArg, '--version');
+  assert.strictEqual(cnb.installScript, undefined);
 });
 
-check('Electron/IPC and supply-chain protections are wired into runtime paths', () => {
+check('Qoder native script tool does not carry dead npm pkg metadata', () => {
+  const qoder = BUILTIN_TOOLS.find(tool => tool.id === 'qoder');
+  assert(qoder, 'missing Qoder CLI');
+  assert.strictEqual(qoder.pkg, undefined);
+  assert(qoder.installScript, 'Qoder should use official installScript');
+});
+
+check('per-profile result aggregation rejects empty and partial success', () => {
+  assert.strictEqual(profileResultsSucceeded([]), false);
+  assert.strictEqual(profileResultsSucceeded([{ ok: true }, { ok: false }]), false);
+  assert.strictEqual(profileResultsSucceeded([{ ok: true }, { ok: true }]), true);
+});
+
+check('Electron/IPC, packaging, and supply-chain protections are wired into runtime paths', () => {
+  assert(pkgJson.build && Array.isArray(pkgJson.build.files) && pkgJson.build.files.includes('lib/**/*.js'),
+    'package.json build.files must bundle lib/**/*.js');
+  assert.strictEqual(pkgJson.scripts.postinstall, undefined, 'redundant postinstall should be removed');
   assert.match(mainSource, /sandbox:\s*true/);
   assert.match(mainSource, /function isTrustedIpcEvent\(/);
   assert.match(mainSource, /frame !== contents\.mainFrame/);
@@ -135,24 +158,34 @@ check('Electron/IPC and supply-chain protections are wired into runtime paths', 
   assert.doesNotMatch(mainSource, /(?:curl|irm|Invoke-RestMethod)[^\n]{0,300}\|\s*(?:bash|sh|iex)/i);
   assert.match(mainSource, /hasOnlyFields\(t, \['id', 'name', 'cmd', 'pkg', 'versionArg'\]\)/);
   assert.match(mainSource, /hasOnlyFields\(toolConfig, \['name', 'cmd', 'pkg', 'versionArg'\]\)/);
-  assert.match(mainSource, /id: t\.id,[\s\S]*?versionArg: \(t\.versionArg/);
   assert.doesNotMatch(mainSource.slice(mainSource.indexOf('function loadCustomTools'), mainSource.indexOf('function saveCustomTools')), /\.\.\.t/);
   assert.match(preloadSource, /onCheckRunStarted/);
+  assert.match(preloadSource, /onBackgroundResults/);
   assert.match(rendererSource, /payload\.runId === latestCheckRunId/);
   assert.match(rendererSource, /response\.runId !== latestCheckRunId/);
   assert.match(mainSource, /CHECK_BATCH_MIN_INTERVAL_MS = 1000/);
   assert.match(mainSource, /createConcurrencyLimiter\(4\)/);
+  // cmd.exe AutoRun must be disabled with /d
+  assert.match(mainSource, /\['\/d',\s*'\/c'/);
+  // Custom registry UI hint must require https://
+  assert.doesNotMatch(htmlSource, /仅支持 http:\/\/ 或 https:\/\//);
+  assert.match(htmlSource, /仅支持 https:\/\//);
+  // Single-tool check-version must not call beginCheckRun() and abort batch checks
+  const singleCheckBlock = mainSource.slice(
+    mainSource.indexOf("registerTrustedIpcHandler('check-version'"),
+    mainSource.indexOf("registerTrustedIpcHandler('update-tool'")
+  );
+  assert.doesNotMatch(singleCheckBlock, /beginCheckRun\(/);
 });
 
 check('IPC trusts only the current local main frame', () => {
-  const appDirectory = path.join(__dirname, '..');
-  const frame = { url: pathToFileURL(path.join(appDirectory, 'index.html')).href };
+  const frame = { url: pathToFileURL(path.join(rootDir, 'index.html')).href };
   const contents = { mainFrame: frame };
   let destroyed = false;
   const window = { webContents: contents, isDestroyed: () => destroyed };
   const isTrusted = new Function('mainWindow', 'path', 'pathToFileURL', '__dirname',
-    `${extractFunction('isTrustedIpcEvent')}\nreturn isTrustedIpcEvent;`
-  )(window, path, pathToFileURL, appDirectory);
+    `${extractMainFunction('isTrustedIpcEvent')}\nreturn isTrustedIpcEvent;`
+  )(window, path, pathToFileURL, rootDir);
   assert.strictEqual(isTrusted({ sender: contents, senderFrame: frame }), true);
   assert.strictEqual(isTrusted({ sender: {}, senderFrame: frame }), false);
   assert.strictEqual(isTrusted({ sender: contents, senderFrame: { url: frame.url } }), false);
@@ -163,9 +196,39 @@ check('IPC trusts only the current local main frame', () => {
   assert.strictEqual(isTrusted({ sender: contents, senderFrame: frame }), false);
 });
 
-checkAsync('one failed tool check does not reject its batch', async () => {
-  const safeCheck = new Function('checkTool',
-    `${extractFunction('checkToolSafely')}\nreturn checkToolSafely;`
+check('findCommandInPath locates executables in memory without spawning child processes', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'verify-path-scan-'));
+  try {
+    const winCmd = path.join(temp, 'demo-cli.cmd');
+    fs.writeFileSync(winCmd, '@echo off\r\necho 1.0.0\r\n', 'utf8');
+    const foundWin = findCommandInPath('demo-cli', {
+      platform: 'win32',
+      env: { Path: `"${temp}"`, PATHEXT: '.COM;.EXE;.BAT;.CMD' }
+    });
+    assert.strictEqual(foundWin.found, true);
+    assert.strictEqual(foundWin.ext, '.cmd');
+    assert.strictEqual(foundWin.fullPath, winCmd);
+
+    const missingWin = findCommandInPath('nonexistent-cli-xyz', {
+      platform: 'win32',
+      env: { Path: temp, PATHEXT: '.COM;.EXE;.BAT;.CMD' }
+    });
+    assert.strictEqual(missingWin.found, false);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+checkAsync('spawnDetachedSafely resolves error cleanly instead of crashing on ENOENT', async () => {
+  const res = await spawnDetachedSafely('definitely-missing-binary-ai-updater-test-9999', []);
+  assert.strictEqual(res.success, false);
+  assert(res.error, 'expected error message on missing binary');
+});
+
+checkAsync('one failed tool check does not reject its batch and assigns monotonic seq', async () => {
+  let latestToolSeq = 0;
+  const safeCheck = new Function('checkTool', 'bumpSeq',
+    `let latestToolSeq = 0;\n${extractMainFunction('checkToolSafely')}\nreturn checkToolSafely;`
   )(async tool => {
     if (tool.id === 'bad') throw new Error('isolated failure');
     return { ...tool, installed: true };
@@ -174,25 +237,29 @@ checkAsync('one failed tool check does not reject its batch', async () => {
   assert.strictEqual(results[0].error, 'isolated failure');
   assert.strictEqual(results[0].needsUpdate, false);
   assert.strictEqual(results[1].installed, true);
+  assert(results[0].seq >= 1 && results[1].seq >= 1 && results[0].seq !== results[1].seq);
+  void latestToolSeq;
 });
 
 check('POSIX children are detached and process groups are signalled', () => {
+  const procUtilsSource = fs.readFileSync(path.join(rootDir, 'lib', 'process-utils.js'), 'utf8');
   assert.match(mainSource, /detached:\s*!isWin/);
-  assert.match(mainSource, /process\.kill\(-child\.pid, 'SIGTERM'\)/);
-  assert.match(mainSource, /process\.kill\(-child\.pid, 'SIGKILL'\)/);
+  assert.match(procUtilsSource, /process\.kill\(-child\.pid, 'SIGTERM'\)/);
+  assert.match(procUtilsSource, /process\.kill\(-child\.pid, 'SIGKILL'\)/);
 });
 
-check('agyyolo confirmation and reversible management are wired in', () => {
+check('agyyolo and cmdcyolo confirmation and reversible management are wired in', () => {
   assert.match(mainSource, /我了解风险，继续/);
   assert.match(mainSource, /remove-agyyolo/);
   assert.match(mainSource, /profileResultsSucceeded\(results\)/);
-  assert.match(mainSource, /function removeAgyyoloFromProfile\(/);
   assert.match(rendererSource, /btn-remove-agyyolo/);
-  assert.match(standaloneAgyyoloSource, /Read-Host '确认写入请输入 YES/);
-  assert.match(standaloneAgyyoloSource, /\[switch\]\$Remove/);
-  assert.match(standaloneAgyyoloSource, /Write-ProfileAtomically/);
-  assert.doesNotMatch(standaloneAgyyoloSource, /New-Item[^\n]*-LiteralPath/);
-  assert.match(standaloneAgyyoloSource, /Get-ManagedState/);
+  for (const psSource of [standaloneAgyyoloSource, standaloneCmdcyoloSource]) {
+    assert.match(psSource, /Read-Host '确认写入请输入 YES/);
+    assert.match(psSource, /\[switch\]\$Remove/);
+    assert.match(psSource, /Write-ProfileAtomically/);
+    assert.doesNotMatch(psSource, /New-Item[^\n]*-LiteralPath/);
+    assert.match(psSource, /Get-ManagedState/);
+  }
 });
 
 check('agyyolo install/remove preserves user content and is idempotent', () => {
@@ -200,15 +267,15 @@ check('agyyolo install/remove preserves user content and is idempotent', () => {
   try {
     const profile = path.join(temp, 'Microsoft.PowerShell_profile.ps1');
     fs.writeFileSync(profile, '# user content\n', 'utf8');
-    const first = helpers.installAgyyoloToProfile(profile);
+    const first = installAgyyoloToProfile(profile);
     assert.strictEqual(first.ok, true);
     const installed = fs.readFileSync(profile, 'utf8');
     assert.match(installed, /# user content/);
     assert.match(installed, /# >>> AI Code Tool Updater: agyyolo >>>/);
     assert.match(installed, /agy --dangerously-skip-permissions/);
-    assert.strictEqual(helpers.installAgyyoloToProfile(profile).ok, true);
+    assert.strictEqual(installAgyyoloToProfile(profile).ok, true);
     assert.strictEqual(fs.readFileSync(profile, 'utf8'), installed);
-    assert.strictEqual(helpers.removeAgyyoloFromProfile(profile).ok, true);
+    assert.strictEqual(removeAgyyoloFromProfile(profile).ok, true);
     const removed = fs.readFileSync(profile, 'utf8');
     assert.match(removed, /# user content/);
     assert.doesNotMatch(removed, /function agyyolo/);
@@ -217,15 +284,15 @@ check('agyyolo install/remove preserves user content and is idempotent', () => {
     const customProfile = path.join(temp, 'custom.ps1');
     fs.writeFileSync(customProfile, 'function agyyolo { Write-Host custom }\n', 'utf8');
     const before = fs.readFileSync(customProfile, 'utf8');
-    assert.strictEqual(helpers.installAgyyoloToProfile(customProfile).ok, false);
-    assert.strictEqual(helpers.removeAgyyoloFromProfile(customProfile).ok, false);
+    assert.strictEqual(installAgyyoloToProfile(customProfile).ok, false);
+    assert.strictEqual(removeAgyyoloFromProfile(customProfile).ok, false);
     assert.strictEqual(fs.readFileSync(customProfile, 'utf8'), before);
 
     const brokenProfile = path.join(temp, 'broken.ps1');
     const broken = '# >>> AI Code Tool Updater: agyyolo >>>\n# incomplete\n';
     fs.writeFileSync(brokenProfile, broken, 'utf8');
-    assert.strictEqual(helpers.installAgyyoloToProfile(brokenProfile).ok, false);
-    assert.strictEqual(helpers.removeAgyyoloFromProfile(brokenProfile).ok, false);
+    assert.strictEqual(installAgyyoloToProfile(brokenProfile).ok, false);
+    assert.strictEqual(removeAgyyoloFromProfile(brokenProfile).ok, false);
     assert.strictEqual(fs.readFileSync(brokenProfile, 'utf8'), broken);
 
     for (const [label, changed] of [
@@ -236,38 +303,38 @@ check('agyyolo install/remove preserves user content and is idempotent', () => {
     ]) {
       const conflictProfile = path.join(temp, `${label}.ps1`);
       fs.writeFileSync(conflictProfile, changed, 'utf8');
-      assert.strictEqual(helpers.installAgyyoloToProfile(conflictProfile).ok, false);
-      assert.strictEqual(helpers.removeAgyyoloFromProfile(conflictProfile).ok, false);
+      assert.strictEqual(installAgyyoloToProfile(conflictProfile).ok, false);
+      assert.strictEqual(removeAgyyoloFromProfile(conflictProfile).ok, false);
       assert.strictEqual(fs.readFileSync(conflictProfile, 'utf8'), changed);
     }
+
     const legacyProfile = path.join(temp, 'legacy.ps1');
     const legacy = 'function agyyolo {\n    agy --dangerously-skip-permissions\n}\n';
     fs.writeFileSync(legacyProfile, '# keep\n' + legacy + legacy, 'utf8');
-    assert.strictEqual(helpers.installAgyyoloToProfile(legacyProfile).ok, true);
+    assert.strictEqual(installAgyyoloToProfile(legacyProfile).ok, true);
     assert.strictEqual((fs.readFileSync(legacyProfile, 'utf8').match(/# >>>/g) || []).length, 1);
-    assert.strictEqual(helpers.removeAgyyoloFromProfile(legacyProfile).ok, true);
+    assert.strictEqual(removeAgyyoloFromProfile(legacyProfile).ok, true);
     assert.strictEqual(fs.readFileSync(legacyProfile, 'utf8'), '# keep\n');
 
     const bomProfile = path.join(temp, 'bom.ps1');
     fs.writeFileSync(bomProfile, '\uFEFF# 用户设置\r\n', 'utf8');
-    assert.strictEqual(helpers.installAgyyoloToProfile(bomProfile).ok, true);
-    assert.strictEqual(helpers.removeAgyyoloFromProfile(bomProfile).ok, true);
+    assert.strictEqual(installAgyyoloToProfile(bomProfile).ok, true);
+    assert.strictEqual(removeAgyyoloFromProfile(bomProfile).ok, true);
     assert.strictEqual(fs.readFileSync(bomProfile, 'utf8'), '\uFEFF# 用户设置\r\n');
+
     const utf16Profile = path.join(temp, 'utf16.ps1');
     const utf16 = Buffer.from('\uFEFF# user settings\r\n', 'utf16le');
     fs.writeFileSync(utf16Profile, utf16);
-    assert.throws(() => helpers.installAgyyoloToProfile(utf16Profile), /UTF-8/);
-    assert.throws(() => helpers.removeAgyyoloFromProfile(utf16Profile), /UTF-8/);
+    assert.throws(() => installAgyyoloToProfile(utf16Profile), /UTF-8/);
+    assert.throws(() => removeAgyyoloFromProfile(utf16Profile), /UTF-8/);
     assert.deepStrictEqual(fs.readFileSync(utf16Profile), utf16);
-
-
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }
 });
 
 checkAsync('shared concurrency limiter never exceeds its configured bound', async () => {
-  const limit = helpers.createConcurrencyLimiter(2);
+  const limit = createConcurrencyLimiter(2);
   let active = 0;
   let maximum = 0;
   await Promise.all(Array.from({ length: 8 }, () => limit(async () => {
@@ -284,7 +351,6 @@ checkAsync('POSIX cleanup escalates for descendants after their group leader exi
     console.log('SKIP process integration test (requires Linux /proc)');
     return;
   }
-  // The shell exits immediately; sleep inherits ignored SIGTERM and keeps the pipe open.
   const child = spawn('sh', ['-c', 'trap "" TERM; sleep 30 & echo $!'], {
     detached: true,
     stdio: ['ignore', 'pipe', 'ignore']
@@ -310,7 +376,7 @@ checkAsync('POSIX cleanup escalates for descendants after their group leader exi
     });
     const [descendantPid] = await Promise.all([pidReady, leaderExited]);
     assert.notStrictEqual(child.exitCode, null);
-    helpers.killProcessTree(child);
+    killProcessTree(child);
     const deadline = Date.now() + 3000;
     let running = true;
     while (Date.now() < deadline) {

@@ -76,7 +76,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   installAgyyolo: () => ipcRenderer.invoke('install-agyyolo'),
   removeAgyyolo: () => ipcRenderer.invoke('remove-agyyolo'),
 
-  // 一键打开 PowerShell
+  // 一键打开 PowerShell / 终端
   openPowerShell: () => ipcRenderer.invoke('open-powershell'),
 
   // 打开外部链接
@@ -86,19 +86,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onUpdateLog: (callback) => {
     const wrapped = (event, data) => callback(data);
     ipcRenderer.on('update-log', wrapped);
-    // 返回取消订阅函数
     return () => ipcRenderer.removeListener('update-log', wrapped);
   },
 
   // 监听主进程触发的检测命令（从托盘菜单触发）
-  // 返回取消订阅函数，防止多次绑定导致重复触发
   onTriggerCheck: (callback) => {
     const wrapped = () => callback();
     ipcRenderer.on('trigger-check', wrapped);
     return () => ipcRenderer.removeListener('trigger-check', wrapped);
   },
 
-  // 监听检测轮次开始；渲染层据此忽略任何较旧批次的迟到结果。
+  // 监听检测轮次开始；渲染层据此忽略任何较旧批次的迟到结果
   onCheckRunStarted: (callback) => {
     const wrapped = (event, runId) => callback(runId);
     ipcRenderer.on('check-run-started', wrapped);
@@ -112,6 +110,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener('tool-checked', wrapped);
   },
 
+  // 监听后台静默检测汇总结果，保持驻留窗口状态同步
+  onBackgroundResults: (callback) => {
+    const wrapped = (event, data) => callback(data);
+    ipcRenderer.on('background-results', wrapped);
+    return () => ipcRenderer.removeListener('background-results', wrapped);
+  },
+
   // 监听主进程发来的高亮指定工具指令（通知点击后定位）
   onHighlightTool: (callback) => {
     const wrapped = (event, toolId) => callback(toolId);
@@ -119,15 +124,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener('highlight-tool', wrapped);
   },
 
-  // 对指定镜像源 URL 测速（通过 npm ping 命令）
+  // 对指定镜像源 URL 测速
   pingRegistry: (url) => ipcRenderer.invoke('ping-registry', url),
 
-  // 移除所有日志监听（方便重新绑定）
+  // 移除所有日志及状态监听（方便重新绑定）
   removeAllLogListeners: () => {
     ipcRenderer.removeAllListeners('update-log');
     ipcRenderer.removeAllListeners('trigger-check');
     ipcRenderer.removeAllListeners('tool-checked');
     ipcRenderer.removeAllListeners('check-run-started');
+    ipcRenderer.removeAllListeners('background-results');
     ipcRenderer.removeAllListeners('highlight-tool');
   }
 });

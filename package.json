@@ -10,8 +10,7 @@
     "sign:win": "powershell -ExecutionPolicy Bypass -File scripts/sign-and-build.ps1",
     "build:mac": "electron-builder --mac",
     "icons": "node scripts/generate-icons.js",
-    "test": "node scripts/verify-semver.js && node scripts/verify-safety.js",
-    "postinstall": "electron-builder install-app-deps"
+    "test": "node --check main.js && node --check preload.js && node --check script.js && node scripts/verify-semver.js && node scripts/verify-safety.js && node scripts/verify-renderer.js"
   },
   "keywords": [
     "updater",
@@ -43,6 +42,7 @@
       "index.html",
       "style.css",
       "script.js",
+      "lib/**/*.js",
       "package.json",
       "build/icon.ico",
       "build/icon.icns",

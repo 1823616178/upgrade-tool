@@ -1,30 +1,31 @@
 // scripts/verify-semver.js
-// 从 main.js 中提取 semver 相关纯函数并断言比较行为（无测试框架下的轻量验证）
+// 直接引入 lib/semver 与 lib/validators 模块验证语义版本比较与输入安全校验
 // 用法：node scripts/verify-semver.js，全部 PASS 退出码 0，否则 1
-const fs = require('fs');
-const path = require('path');
+const {
+  extractVersionNumber,
+  extractVersionLine,
+  parseSemver,
+  comparePrerelease,
+  compareSemver
+} = require('../lib/semver');
+const {
+  isValidRegistryUrl,
+  isValidNpmPackage,
+  isValidCliCommand,
+  isValidVersionArg
+} = require('../lib/validators');
 
-const src = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
-
-// 提取顶层函数定义（以 "function name(" 开始、以行首 "}" 结束）
-// 注意：仅用于这个无框架的轻量测试，函数格式变化时需要同步调整
-const fnNames = [
-  'extractVersionNumber', 'parseSemver', 'comparePrerelease', 'compareSemver',
-  'isValidRegistryUrl', 'isValidNpmPackage', 'isValidCliCommand', 'isValidVersionArg'
-];
-const fnSources = [];
-for (const name of fnNames) {
-  const m = src.match(new RegExp(`function ${name}\\([\\s\\S]*?\\n}`));
-  if (!m) {
-    console.error(`未找到函数: ${name}`);
-    process.exit(1);
-  }
-  fnSources.push(m[0]);
-}
-// 把所有函数放进同一个函数作用域，保证 compareSemver 能访问 parseSemver 等依赖
-const fns = new Function(
-  `${fnSources.join('\n')}\nreturn { ${fnNames.map(n => `${n}: ${n}`).join(', ')} };`
-)();
+const fns = {
+  extractVersionNumber,
+  extractVersionLine,
+  parseSemver,
+  comparePrerelease,
+  compareSemver,
+  isValidRegistryUrl,
+  isValidNpmPackage,
+  isValidCliCommand,
+  isValidVersionArg
+};
 
 const cases = [
   ['1.2.3', '1.2.4', -1],
@@ -52,7 +53,20 @@ for (const [a, b, expected] of cases) {
   console.log(`${ok ? 'PASS' : 'FAIL'} compareSemver(${JSON.stringify(a)}, ${JSON.stringify(b)}) = ${got} (期望 ${expected})`);
 }
 
-// 输入校验函数：这些值会拼进 shell 命令，必须拒绝空格和特殊字符
+// 多行输出版本提取：跳过首行 Warning / AutoRun 杂音，定位真正的版本行
+const lineCases = [
+  [['(node:1234) ExperimentalWarning: foo\n2.1.201 (Claude Code)\n', ''], '2.1.201 (Claude Code)'],
+  [['\n\n', 'cli version 1.4.2\n'], 'cli version 1.4.2'],
+  [['custom-build-nonsemver\nsecond-line', ''], 'custom-build-nonsemver'],
+];
+for (const [[stdout, stderr], expected] of lineCases) {
+  const got = fns.extractVersionLine(stdout, stderr);
+  const ok = got === expected;
+  if (!ok) failed++;
+  console.log(`${ok ? 'PASS' : 'FAIL'} extractVersionLine() = ${JSON.stringify(got)} (期望 ${JSON.stringify(expected)})`);
+}
+
+// 输入校验函数：这些值会拼进子进程参数，必须拒绝空格和特殊字符
 const validatorCases = [
   ['isValidVersionArg', ['--version'], true],
   ['isValidVersionArg', ['-V'], true],

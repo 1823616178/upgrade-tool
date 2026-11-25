@@ -17,9 +17,9 @@ echo.
 REM 优先使用 PowerShell 7+，不存在则回退到 Windows PowerShell 5.1
 where pwsh.exe >nul 2>nul
 if %errorlevel% == 0 (
-    pwsh.exe -ExecutionPolicy Bypass -NoProfile -File "%PS_SCRIPT%"
+    pwsh.exe -ExecutionPolicy Bypass -NoProfile -File "%PS_SCRIPT%" %*
 ) else (
-    powershell.exe -ExecutionPolicy Bypass -NoProfile -File "%PS_SCRIPT%"
+    powershell.exe -ExecutionPolicy Bypass -NoProfile -File "%PS_SCRIPT%" %*
 )
 
 exit /b %ERRORLEVEL%

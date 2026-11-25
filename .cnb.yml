@@ -1,4 +1,17 @@
+main:
+  push:
+    - docker:
+        image: node:22-alpine
+      stages:
+        - name: syntax and regression tests
+          script: npm test
 $:
+  pull_request:
+    - docker:
+        image: node:22-alpine
+      stages:
+        - name: syntax and regression tests
+          script: npm test
   issue.comment@npc:
     - docker:
         image: cnbcool/default-npc:latest
