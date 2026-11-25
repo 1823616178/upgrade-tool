@@ -75,7 +75,9 @@ function createMockElement(tagName = 'div', id = '') {
       if (idx !== -1) children.splice(idx, 1);
       return child;
     },
-    insertAdjacentElement() {},
+    insertAdjacentElement(pos, node) {
+      if (node) children.push(node);
+    },
     setAttribute(k, v) { attributes[k] = String(v); },
     getAttribute(k) { return attributes[k]; },
     getBoundingClientRect: () => ({ top: 100, bottom: 700, height: 600 }),
@@ -220,6 +222,7 @@ function createRendererHarness(apiOverrides = {}) {
   source = source.replace(/\ninit\(\);\s*$/, `
 globalThis.__test = {
   init,
+  checkEnvironment,
   classifyTool,
   uninstallTool,
   installAll,
@@ -355,6 +358,46 @@ async function run() {
     const results = await test.measureAllRegistries();
     assert.strictEqual(results.length, 3);
     assert(pinged.includes('https://npm.corp.example.com/'));
+  });
+
+  await runCase('checkEnvironment renders warning banner for missing npm global PATH without showing Node.js download link', async () => {
+    const { test, getEl } = createRendererHarness({
+      checkEnvironment: async () => ({
+        node: 'v26.13.1',
+        npm: '11.20.0',
+        os: 'Windows 11',
+        npmGlobalBin: 'C:\\Users\\demo\\nvm\\installs\\v26.13.1',
+        npmGlobalBinInPath: false,
+        errors: [],
+        warnings: ['npm 全局目录（C:\\Users\\demo\\nvm\\installs\\v26.13.1）不在系统 PATH 中']
+      })
+    });
+    await test.checkEnvironment();
+    const banner = getEl('env-banner');
+    const bannerText = getEl('env-banner-text');
+    assert.strictEqual(banner.style.display, 'flex');
+    assert.strictEqual(banner.classList.contains('env-banner-warning'), true);
+    assert.match(bannerText.textContent, /不在系统 PATH 中/);
+    assert.strictEqual(bannerText.children.length, 0, 'warning about npm PATH must not attach Node.js download link');
+  });
+
+  await runCase('checkEnvironment renders error banner with Node.js link when Node.js/npm is missing', async () => {
+    const { test, getEl } = createRendererHarness({
+      checkEnvironment: async () => ({
+        node: null,
+        npm: null,
+        os: 'Windows 11',
+        errors: ['未检测到 Node.js，请先安装 Node.js (https://nodejs.org)'],
+        warnings: []
+      })
+    });
+    await test.checkEnvironment();
+    const banner = getEl('env-banner');
+    const bannerText = getEl('env-banner-text');
+    assert.strictEqual(banner.style.display, 'flex');
+    assert.strictEqual(banner.classList.contains('env-banner-warning'), false);
+    assert.strictEqual(bannerText.children.length, 1);
+    assert.strictEqual(bannerText.children[0].textContent, '打开 Node.js 官网');
   });
 
   if (failed > 0) {

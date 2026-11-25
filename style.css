@@ -110,6 +110,12 @@ html, body {
   animation: slideDown 0.4s var(--ease);
 }
 
+.env-banner.env-banner-warning {
+  background: linear-gradient(90deg, rgba(245, 158, 11, 0.14), rgba(234, 179, 8, 0.08));
+  border-bottom-color: rgba(245, 158, 11, 0.25);
+  color: #fcd34d;
+}
+
 @keyframes slideDown {
   from { transform: translateY(-100%); opacity: 0; }
   to   { transform: translateY(0);     opacity: 1; }

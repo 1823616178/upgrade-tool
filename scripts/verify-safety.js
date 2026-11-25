@@ -25,6 +25,10 @@ const {
 } = require('../lib/ps-profile');
 const {
   findCommandInPath,
+  normalizePathDir,
+  getNpmGlobalBinDir,
+  isDirInPath,
+  appendDirToPath,
   killProcessTree,
   spawnDetachedSafely
 } = require('../lib/process-utils');
@@ -217,6 +221,54 @@ check('findCommandInPath locates executables in memory without spawning child pr
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }
+});
+
+check('npm global bin helpers handle Windows/POSIX paths, spaces, noise lines, and junction/symlink realpaths', () => {
+  assert.strictEqual(
+    normalizePathDir('"C:\\Users\\demo\\AppData\\Local\\Author Software\\nvm\\\\.nodejs\\"', 'win32'),
+    'c:\\users\\demo\\appdata\\local\\author software\\nvm\\.nodejs'
+  );
+  assert.strictEqual(normalizePathDir('C:\\', 'win32'), 'c:\\');
+  assert.strictEqual(normalizePathDir('/usr/local/bin/', 'linux'), '/usr/local/bin');
+  assert.strictEqual(normalizePathDir('/', 'linux'), '/');
+
+  assert.strictEqual(
+    getNpmGlobalBinDir('npm warn config something\nC:\\Users\\demo\\AppData\\Local\\Author Software\\nvm\\installs\\v26.13.1\n', 'win32'),
+    'C:\\Users\\demo\\AppData\\Local\\Author Software\\nvm\\installs\\v26.13.1'
+  );
+  assert.strictEqual(getNpmGlobalBinDir('/Users/demo/.npm-global\n', 'darwin'), '/Users/demo/.npm-global/bin');
+  assert.strictEqual(getNpmGlobalBinDir('relative/path', 'linux'), null);
+
+  const shimPath = 'C:\\Windows\\System32;C:\\Users\\demo\\AppData\\Local\\Author Software\\nvm\\\\.nodejs';
+  const nvmInstallDir = 'C:\\Users\\demo\\AppData\\Local\\Author Software\\nvm\\installs\\v26.13.1';
+  assert.strictEqual(isDirInPath(nvmInstallDir, shimPath, { platform: 'win32', resolveRealPath: false }), false);
+  assert.strictEqual(
+    isDirInPath('C:\\Users\\demo\\AppData\\Local\\Author Software\\nvm\\.nodejs', shimPath, { platform: 'win32', resolveRealPath: false }),
+    true
+  );
+
+  const appended = appendDirToPath(shimPath, nvmInstallDir, { platform: 'win32', resolveRealPath: false });
+  assert.strictEqual(appended, `${shimPath};${nvmInstallDir}`);
+  assert.strictEqual(appendDirToPath(appended, nvmInstallDir, { platform: 'win32', resolveRealPath: false }), appended);
+
+  // 真实文件系统符号链接 / Windows Junction 匹配验证（避免 NVM link 模式误报）
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'verify-npm-bin-link-'));
+  try {
+    const realDir = path.join(temp, 'installs', 'v26');
+    const linkDir = path.join(temp, '.nodejs');
+    fs.mkdirSync(realDir, { recursive: true });
+    fs.symlinkSync(realDir, linkDir, process.platform === 'win32' ? 'junction' : 'dir');
+    assert.strictEqual(isDirInPath(realDir, linkDir), true);
+    assert.strictEqual(isDirInPath(linkDir, realDir), true);
+    assert.strictEqual(appendDirToPath(linkDir, realDir), linkDir);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+
+  // 主进程已将 npm 全局目录探测接入 PATH 刷新与环境告警
+  assert.match(mainSource, /async function syncNpmGlobalBinToPath\(/);
+  assert.match(mainSource, /await syncNpmGlobalBinToPath\(/);
+  assert.match(mainSource, /npmGlobalBinInPath/);
 });
 
 checkAsync('spawnDetachedSafely resolves error cleanly instead of crashing on ENOENT', async () => {

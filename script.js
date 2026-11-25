@@ -395,14 +395,19 @@ async function checkEnvironment() {
     if (envNpm) envNpm.textContent = `npm: ${env.npm || '未安装'}`;
     if (envOs) envOs.textContent = env.os || 'OS: 未知';
 
-    if (env.errors && env.errors.length > 0) {
+    const errors = Array.isArray(env.errors) ? env.errors : [];
+    const warnings = Array.isArray(env.warnings) ? env.warnings : [];
+    const notices = [...errors, ...warnings];
+
+    const oldLink = envBanner.querySelector('.env-banner-link');
+    if (oldLink) oldLink.remove();
+
+    if (notices.length > 0) {
       envBanner.style.display = 'flex';
-      envBannerText.textContent = env.errors.join(' | ');
+      envBanner.classList.toggle('env-banner-warning', errors.length === 0 && warnings.length > 0);
+      envBannerText.textContent = notices.join(' | ');
 
-      const oldLink = envBanner.querySelector('.env-banner-link');
-      if (oldLink) oldLink.remove();
-
-      if (env.errors.some(e => /Node\.js|npm/i.test(e))) {
+      if (errors.some(e => /Node\.js|npm/i.test(e))) {
         const link = document.createElement('button');
         link.type = 'button';
         link.className = 'env-banner-link';
@@ -413,7 +418,15 @@ async function checkEnvironment() {
         envBannerText.insertAdjacentElement('afterend', link);
       }
 
-      appendLog('error', 'system', `环境异常: ${env.errors.join('; ')}`);
+      if (errors.length > 0) {
+        appendLog('error', 'system', `环境异常: ${errors.join('; ')}`);
+      }
+      if (warnings.length > 0) {
+        appendLog('info', 'system', `环境提示: ${warnings.join('; ')}`);
+      }
+    } else {
+      envBanner.style.display = 'none';
+      envBanner.classList.remove('env-banner-warning');
     }
   } catch (err) {
     appendLog('error', 'system', `环境检测失败: ${err.message}`);

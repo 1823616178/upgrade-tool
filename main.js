@@ -32,6 +32,10 @@ const {
 } = require('./lib/ps-profile');
 const {
   findCommandInPath,
+  normalizePathDir,
+  getNpmGlobalBinDir,
+  isDirInPath,
+  appendDirToPath,
   killProcessTree,
   spawnDetachedSafely
 } = require('./lib/process-utils');
@@ -570,6 +574,8 @@ function execCommand(command, args = [], options = {}) {
 const PATH_CACHE_TTL = 30 * 1000;
 let _pathRefreshedAt = 0;
 let _pathRefreshInflight = null;
+// 记录最近一次探测到的 npm 全局可执行目录是否在系统原生 PATH 中（用于环境告警与去重）
+let _npmGlobalBinState = { binDir: null, inSystemPath: true, injectedDir: null };
 
 const PATH_SPLIT_MARKER = '<<<PATHSPLIT>>>';
 const READ_PATH_PS = [
@@ -577,6 +583,56 @@ const READ_PATH_PS = [
   `'${PATH_SPLIT_MARKER}'`,
   "[Environment]::GetEnvironmentVariable('Path','User')"
 ].join('; ');
+
+/**
+ * 探测当前激活 npm 的全局可执行目录（如 NVM v2 shim 模式下的 installs/vX.Y.Z 或自定义 npm prefix）
+ * 若该目录不在系统 PATH 中，则追加到当前进程 PATH 末尾，避免安装后立刻回查误判「未安装」
+ * @param {string} systemPath - 系统/登录 shell 原生 PATH（未包含本应用注入的目录）
+ * @returns {Promise<{ binDir: string|null, inSystemPath: boolean, injectedDir: string|null }>}
+ */
+async function syncNpmGlobalBinToPath(systemPath) {
+  const platform = os.platform();
+  const isWin = platform === 'win32';
+  const npmLoc = findCommandInPath('npm', { platform, env: process.env });
+  if (!npmLoc.found) {
+    _npmGlobalBinState = { binDir: null, inSystemPath: true, injectedDir: null };
+    return _npmGlobalBinState;
+  }
+
+  try {
+    const directExec = !isWin || npmLoc.ext === '.exe' || npmLoc.ext === '.com';
+    const target = directExec ? npmLoc.fullPath : 'npm';
+    const prefixOutput = await execCommand(target, ['prefix', '-g'], {
+      shell: !directExec,
+      timeout: 6000
+    });
+    const binDir = getNpmGlobalBinDir(prefixOutput, platform);
+    if (!binDir) {
+      _npmGlobalBinState = { binDir: null, inSystemPath: true, injectedDir: null };
+      return _npmGlobalBinState;
+    }
+
+    const inSystemPath = isDirInPath(binDir, systemPath, { platform });
+    let injectedDir = null;
+    if (!inSystemPath && fs.existsSync(binDir)) {
+      const currentRaw = isWin ? (process.env.Path || process.env.PATH || '') : (process.env.PATH || '');
+      const updated = appendDirToPath(currentRaw, binDir, { platform });
+      if (isWin) {
+        process.env.Path = updated;
+        process.env.PATH = updated;
+      } else {
+        process.env.PATH = updated;
+      }
+      injectedDir = binDir;
+    }
+
+    _npmGlobalBinState = { binDir, inSystemPath, injectedDir };
+    return _npmGlobalBinState;
+  } catch {
+    _npmGlobalBinState = { binDir: null, inSystemPath: true, injectedDir: null };
+    return _npmGlobalBinState;
+  }
+}
 
 /**
  * 从系统重新读取 PATH 并写入当前进程（安装后可立即检测到新命令）
@@ -591,6 +647,11 @@ function refreshProcessPath(options = {}) {
 
   _pathRefreshInflight = (async () => {
     try {
+      const prevInjectedNorm = _npmGlobalBinState.injectedDir
+        ? normalizePathDir(_npmGlobalBinState.injectedDir, os.platform())
+        : '';
+      let systemPath = '';
+
       if (os.platform() === 'win32') {
         const output = await execCommand(
           getWindowsPowerShellPath(),
@@ -605,10 +666,14 @@ function refreshProcessPath(options = {}) {
           .split(';')
           .map(p => p.trim())
           .filter(Boolean);
+        systemPath = registryParts.join(';');
         if (registryParts.length) {
           const currentParts = (process.env.Path || process.env.PATH || '').split(';').filter(Boolean);
-          const seen = new Set(registryParts.map(p => p.toLowerCase()));
-          const extras = currentParts.filter(p => !seen.has(p.toLowerCase()));
+          const seen = new Set(registryParts.map(p => normalizePathDir(p, 'win32')).filter(Boolean));
+          const extras = currentParts.filter(p => {
+            const norm = normalizePathDir(p, 'win32');
+            return norm && !seen.has(norm) && norm !== prevInjectedNorm;
+          });
           const merged = [...registryParts, ...extras].join(';');
           process.env.Path = merged;
           process.env.PATH = merged;
@@ -636,11 +701,14 @@ function refreshProcessPath(options = {}) {
             if (match && match[1].trim()) shellPath = match[1].trim();
           } catch { /* 登录 shell 读取失败时退回常见路径 */ }
         }
-        const current = process.env.PATH || '';
+        const current = (process.env.PATH || '')
+          .split(path.delimiter)
+          .filter(p => p && normalizePathDir(p, os.platform()) !== prevInjectedNorm);
+        systemPath = shellPath || current.join(path.delimiter);
         const parts = [
           ...(shellPath ? shellPath.split(path.delimiter) : []),
           ...extras.filter(p => fs.existsSync(p)),
-          ...current.split(path.delimiter)
+          ...current
         ];
         const seen = new Set();
         process.env.PATH = parts
@@ -651,6 +719,8 @@ function refreshProcessPath(options = {}) {
           })
           .join(path.delimiter);
       }
+
+      await syncNpmGlobalBinToPath(systemPath || process.env.Path || process.env.PATH || '');
       _pathRefreshedAt = Date.now();
     } catch {
       // PATH 刷新失败不阻断主流程（也不更新时间戳，下次仍会重试）
@@ -1377,7 +1447,15 @@ registerTrustedIpcHandler('remove-custom-tool', (event, toolId) => {
 // ===== 环境健康检测 IPC =====
 
 registerTrustedIpcHandler('check-environment', async () => {
-  const result = { node: null, npm: null, os: null, errors: [] };
+  const result = {
+    node: null,
+    npm: null,
+    os: null,
+    npmGlobalBin: null,
+    npmGlobalBinInPath: true,
+    errors: [],
+    warnings: []
+  };
 
   try { await refreshProcessPath(); } catch { /* 刷新失败不阻断检测 */ }
 
@@ -1397,6 +1475,19 @@ registerTrustedIpcHandler('check-environment', async () => {
     result.npm = extractVersionLine(npmResult.value);
   } else {
     result.errors.push('未检测到 npm，请检查 Node.js 安装是否完整');
+  }
+
+  if (result.npm && _npmGlobalBinState.binDir) {
+    result.npmGlobalBin = _npmGlobalBinState.binDir;
+    result.npmGlobalBinInPath = _npmGlobalBinState.inSystemPath;
+    if (!_npmGlobalBinState.inSystemPath) {
+      const isNvmShimLayout = isWin && /[\\/]nvm[\\/]installs[\\/]/i.test(_npmGlobalBinState.binDir);
+      result.warnings.push(
+        isNvmShimLayout
+          ? `npm 全局目录（${_npmGlobalBinState.binDir}）不在系统 PATH 中（可能处于 NVM shim 模式）；本应用已自动兼容检测，若终端无法直接运行已装命令，建议执行 "nvm config set mode=link" 或将该目录加入系统 PATH`
+          : `npm 全局目录（${_npmGlobalBinState.binDir}）不在系统 PATH 中；本应用已自动兼容检测，若终端无法直接运行已装命令，请将该目录加入系统 PATH`
+      );
+    }
   }
 
   try {
